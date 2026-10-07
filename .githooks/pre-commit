@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.c' '*.h')
+[ -z "$staged" ] && exit 0
+
+make -s format-check FMT_FILES="$(echo $staged)" || {
+  echo "pre-commit: run 'make format', then stage again" >&2
+  exit 1
+}
+
+staged_src=$(git diff --cached --name-only --diff-filter=ACMR -- 'src/*.c')
+[ -z "$staged_src" ] && exit 0
+
+make -s lint SRC="$(echo $staged_src)" TIDYFLAGS="--warnings-as-errors=*"
