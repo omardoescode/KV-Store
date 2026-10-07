@@ -44,7 +44,10 @@ lint:
 lint-fix:
 	clang-tidy --quiet --fix $(TIDYFLAGS) $(SRC) -- $(CPPFLAGS) $(CFLAGS)
 
-hooks:
+init:
+	@command -v gcc >/dev/null || { echo "init: gcc not installed" >&2; exit 1; }
+	@command -v clang-format >/dev/null || { echo "init: clang-format not installed" >&2; exit 1; }
+	@command -v clang-tidy >/dev/null || { echo "init: clang-tidy not installed" >&2; exit 1; }
 	git config core.hooksPath .githooks
 
 clean:
