@@ -54,9 +54,8 @@ dkms.conf
 # debug information files
 *.dwo
 
-# Bin directory
-bin/
+# Build directory
+build/
 
 # clangd
-build/
 .cache/

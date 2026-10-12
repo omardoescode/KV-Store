@@ -1,8 +1,8 @@
 CC := gcc
 
-BUILD_DIR := bin
+BUILD_DIR := build
 TARGET := $(BUILD_DIR)/app
-COMPDB := build/compile_commands.json
+COMPDB := $(BUILD_DIR)/compile_commands.json
 
 CFLAGS := -std=c17 \
           -Wall -Wextra -Wpedantic \
@@ -91,4 +91,4 @@ clean:
 	rm -f $(TARGET) $(OBJ) $(DEP)
 
 distclean:
-	rm -rf $(BUILD_DIR) $(dir $(COMPDB))
+	rm -rf $(BUILD_DIR)
