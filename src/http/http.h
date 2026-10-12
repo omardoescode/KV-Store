@@ -20,25 +20,40 @@ typedef enum { HTTP_GET, HTTP_HEAD, HTTP_POST, HTTP_PUT, HTTP_PATCH, HTTP_DELETE
 // Runs on an event loop thread: must not block, must call http_write once before it returns.
 typedef void (*http_handler)(http_response *w, const http_request *r, void *arg);
 
+/** Allocate and initialize a server; register routes before starting it. */
 http_server *http_server_new(void);
 
-// A path matches itself and all paths below it.
-// All calls must come before http_listen_and_serve.
+/**
+ * Register handler for method on path and its descendants, passing arg to each call.
+ * All calls must come before http_listen_and_serve.
+ */
 void http_handle(http_server *s, http_method method, const char *path, http_handler handler,
                  void *arg);
 
-// addr: "host:port". Runs `threads` event loops, one of them on the calling thread.
-// Returns -1 on failure, does not return on success.
+/**
+ * Serve addr ("host:port") with threads event loops, one on the calling thread.
+ * Requires threads >= 1; returns -1 on failure or if the calling event loop stops.
+ */
 int http_listen_and_serve(http_server *s, const char *addr, int threads);
 
+/** Return the borrowed request method, valid until the handler returns. */
 http_str http_req_method(const http_request *r);
+/** Return the borrowed request normalized path, valid until the handler returns. */
 http_str http_req_path(const http_request *r);
+/** Return the borrowed request body, valid until the handler returns. */
 http_str http_req_body(const http_request *r);
-// name must be lowercase. Returns {NULL, 0} if the header is absent.
+/**
+ * Return the first header matching lowercase name, or {NULL, 0} if absent.
+ * The returned value is borrowed and valid until the handler returns.
+ */
 http_str http_req_header(const http_request *r, http_str name);
 
-// name must be lowercase and must stay valid until http_write, e.g. a string literal.
+/**
+ * Set or replace a response header, copying value.
+ * name must be lowercase and stay valid until http_write, e.g. a string literal.
+ */
 void http_set_header(http_response *w, http_str name, http_str value);
+/** Send status and len bytes of body as the final response; call once per request. */
 void http_write(http_response *w, int status, const void *body, size_t len);
 
 #endif

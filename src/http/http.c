@@ -35,6 +35,7 @@ static const h2o_iovec_t method_names[] = {
     [HTTP_PATCH] = {H2O_STRLIT("PATCH")}, [HTTP_DELETE] = {H2O_STRLIT("DELETE")},
 };
 
+/** Dispatch matching methods to the route handler; return -1 to try the next handler. */
 static int on_req(h2o_handler_t *self, h2o_req_t *req) {
   route *rt = (route *)self;
   if (!h2o_memis(req->method.base, req->method.len, rt->method.base, rt->method.len)) {
@@ -44,6 +45,7 @@ static int on_req(h2o_handler_t *self, h2o_req_t *req) {
   return 0;
 }
 
+/** Allocate and initialize a server with a default host and no Server response header. */
 http_server *http_server_new(void) {
   http_server *s = h2o_mem_alloc(sizeof(*s));
   h2o_config_init(&s->config);
@@ -53,6 +55,10 @@ http_server *http_server_new(void) {
   return s;
 }
 
+/**
+ * Register a method handler on a path, reusing its path configuration for fallthrough.
+ * Call before serving; the path also matches descendants and arg is passed to the handler.
+ */
 void http_handle(http_server *s, http_method method, const char *path, http_handler handler,
                  void *arg) {
   // Handlers on one pathconf fall through to the next on -1, separate pathconfs do not.
@@ -75,6 +81,7 @@ void http_handle(http_server *s, http_method method, const char *path, http_hand
   rt->arg = arg;
 }
 
+/** Drain pending connections into the worker context, ignoring listener error callbacks. */
 static void on_accept(h2o_socket_t *listener, const char *err) {
   if (err != NULL) {
     return;
@@ -87,6 +94,7 @@ static void on_accept(h2o_socket_t *listener, const char *err) {
   }
 }
 
+/** Open a reusable TCP listener for ai; return its descriptor or -1 after closing on failure. */
 static int listen_on(const struct addrinfo *ai) {
   int on = 1;
   int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
@@ -103,6 +111,7 @@ static int listen_on(const struct addrinfo *ai) {
   return fd;
 }
 
+/** Initialize a worker context and accept loop; return NULL if the event loop stops. */
 static void *run_worker(void *arg) {
   worker *w = arg;
   h2o_context_init(&w->ctx, h2o_evloop_create(), &w->server->config);
@@ -118,6 +127,10 @@ static void *run_worker(void *arg) {
   return NULL;
 }
 
+/**
+ * Bind host:port and serve with threads event loops, including the calling thread.
+ * Requires threads >= 1; returns -1 on setup failure or if the calling event loop stops.
+ */
 int http_listen_and_serve(http_server *s, const char *addr, int threads) {
   const char *colon = strrchr(addr, ':');
   if (colon == NULL || threads < 1) {
@@ -163,21 +176,28 @@ int http_listen_and_serve(http_server *s, const char *addr, int threads) {
   return -1;
 }
 
+/** Return a borrowed method string, valid only until the request handler returns. */
 http_str http_req_method(const http_request *r) {
   const h2o_req_t *req = (const h2o_req_t *)r;
   return (http_str){req->method.base, req->method.len};
 }
 
+/** Return the borrowed normalized path, valid only until the request handler returns. */
 http_str http_req_path(const http_request *r) {
   const h2o_req_t *req = (const h2o_req_t *)r;
   return (http_str){req->path_normalized.base, req->path_normalized.len};
 }
 
+/** Return the borrowed request body, valid only until the request handler returns. */
 http_str http_req_body(const http_request *r) {
   const h2o_req_t *req = (const h2o_req_t *)r;
   return (http_str){req->entity.base, req->entity.len};
 }
 
+/**
+ * Find the first header with the lowercase name; return {NULL, 0} when absent.
+ * The returned value is borrowed and valid only until the request handler returns.
+ */
 http_str http_req_header(const http_request *r, http_str name) {
   const h2o_req_t *req = (const h2o_req_t *)r;
   ssize_t i = h2o_find_header_by_str(&req->headers, name.ptr, name.len, -1);
@@ -187,6 +207,10 @@ http_str http_req_header(const http_request *r, http_str name) {
   return (http_str){req->headers.entries[i].value.base, req->headers.entries[i].value.len};
 }
 
+/**
+ * Set or replace a response header, copying its value into the request pool.
+ * The name must be lowercase and remain valid until http_write is called.
+ */
 void http_set_header(http_response *w, http_str name, http_str value) {
   h2o_req_t *req = (h2o_req_t *)w;
   h2o_iovec_t copy = h2o_strdup(&req->pool, value.ptr, value.len);
@@ -194,6 +218,7 @@ void http_set_header(http_response *w, http_str name, http_str value) {
                         1);
 }
 
+/** Return a static reason phrase for a supported status, or "Unknown" otherwise. */
 static const char *reason_of(int status) {
   switch (status) {
   case 200:
@@ -219,6 +244,7 @@ static const char *reason_of(int status) {
   }
 }
 
+/** Send the final response with status and len bytes of body; call once per request. */
 void http_write(http_response *w, int status, const void *body, size_t len) {
   h2o_req_t *req = (h2o_req_t *)w;
   req->res.status = status;

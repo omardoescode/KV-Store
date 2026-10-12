@@ -5,6 +5,7 @@
 
 #define ADDR "127.0.0.1:7890"
 
+/** Respond to the ping route with HTTP 200 and a plain-text pong body. */
 static void ping(http_response *w, const http_request *r, void *arg) {
   (void)r;
   (void)arg;
@@ -12,6 +13,7 @@ static void ping(http_response *w, const http_request *r, void *arg) {
   http_write(w, 200, "pong\n", 5);
 }
 
+/** Serve the ping endpoint with one worker per online CPU; return 1 if serving stops. */
 int main(void) {
   http_server *server = http_server_new();
   http_handle(server, HTTP_GET, "/ping", ping, NULL);
