@@ -25,10 +25,17 @@ http_server *http_server_new(void);
 
 /**
  * Register handler for method on path and its descendants, passing arg to each call.
- * All calls must come before http_listen_and_serve.
+ * path must start with '/'. The longest matching path that has a handler for the request
+ * method gets the request. All calls must come before http_listen_and_serve.
  */
 void http_handle(http_server *s, http_method method, const char *path, http_handler handler,
                  void *arg);
+
+/**
+ * Return the CPU count that this process can use: the smaller of the CPU affinity and the
+ * cgroup CPU quota on Linux, the online CPU count on other systems.
+ */
+int http_default_threads(void);
 
 /**
  * Serve addr ("host:port") with threads event loops, one on the calling thread.

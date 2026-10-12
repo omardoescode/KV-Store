@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <unistd.h>
 
 #include "http/http.h"
 
@@ -13,13 +12,12 @@ static void ping(http_response *w, const http_request *r, void *arg) {
   http_write(w, 200, "pong\n", 5);
 }
 
-/** Serve the ping endpoint with one worker per online CPU; return 1 if serving stops. */
+/** Serve the ping endpoint with one worker per usable CPU; return 1 if serving stops. */
 int main(void) {
   http_server *server = http_server_new();
   http_handle(server, HTTP_GET, "/ping", ping, NULL);
 
-  long cpus = sysconf(_SC_NPROCESSORS_ONLN);
-  int threads = cpus > 0 ? (int)cpus : 1;
+  int threads = http_default_threads();
 
   printf("listening on http://" ADDR " with %d threads\n", threads);
   if (http_listen_and_serve(server, ADDR, threads) != 0) {
