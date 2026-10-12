@@ -1,0 +1,4 @@
+[submodule "third_party/h2o"]
+	path = third_party/h2o
+	url = https://github.com/h2o/h2o
+	shallow = true

@@ -56,3 +56,7 @@ dkms.conf
 
 # Bin directory
 bin/
+
+# clangd
+build/
+.cache/
