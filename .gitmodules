@@ -2,3 +2,7 @@
 	path = third_party/h2o
 	url = https://github.com/h2o/h2o
 	shallow = true
+[submodule "third_party/yyjson"]
+	path = third_party/yyjson
+	url = https://github.com/ibireme/yyjson
+	shallow = true

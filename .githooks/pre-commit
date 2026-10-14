@@ -15,3 +15,5 @@ staged_src=$(git diff --cached --name-only --diff-filter=ACMR -- 'src/*.c')
 [ -z "$staged_src" ] && exit 0
 
 make -s lint SRC="$(echo $staged_src)" TIDYFLAGS="--warnings-as-errors=*"
+
+make -s memcheck
