@@ -46,6 +46,7 @@ typedef struct {
   int fd;
   pthread_t tid;
   start_gate *gate;
+  h2o_socket_t *listener;
   h2o_context_t ctx;
   h2o_accept_ctx_t accept_ctx;
 } worker;
@@ -160,11 +161,12 @@ static void *run_worker(void *arg) {
   w->accept_ctx.ctx = &w->ctx;
   w->accept_ctx.hosts = w->server->config.hosts;
 
-  h2o_socket_t *sock = h2o_evloop_socket_create(w->ctx.loop, w->fd, H2O_SOCKET_FLAG_DONT_READ);
-  sock->data = w;
-  h2o_socket_read_start(sock, on_accept);
+  w->listener = h2o_evloop_socket_create(w->ctx.loop, w->fd, H2O_SOCKET_FLAG_DONT_READ);
+  w->listener->data = w;
+  h2o_socket_read_start(w->listener, on_accept);
 
-  while (h2o_evloop_run(w->ctx.loop, INT32_MAX) == 0) {
+  // A signal can interrupt the wait; that is not a reason to stop the loop.
+  while (h2o_evloop_run(w->ctx.loop, INT32_MAX) == 0 || errno == EINTR) {
   }
   return NULL;
 }
