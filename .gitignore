@@ -54,5 +54,11 @@ dkms.conf
 # debug information files
 *.dwo
 
-# Bin directory
-bin/
+# Build directory
+build/
+
+# clangd
+.cache/
+
+# valgrind
+vgcore.*
