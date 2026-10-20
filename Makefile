@@ -18,7 +18,7 @@ YYJSON_DIR := third_party/yyjson
 YYJSON_OBJ := $(BUILD_DIR)/yyjson.o
 YYJSON_CPPFLAGS := -isystem $(YYJSON_DIR)/src
 
-CPPFLAGS := -Iinclude -Isrc
+CPPFLAGS := -Isrc
 
 H2O_CPPFLAGS := -isystem $(H2O_DIR)/include $(H2O_DEPS:%=-isystem $(H2O_DIR)/deps/%) \
                 -DH2O_USE_LIBUV=0 -D_GNU_SOURCE \
@@ -32,7 +32,7 @@ SRC := $(wildcard src/*.c src/*/*.c)
 OBJ := $(SRC:src/%.c=$(BUILD_DIR)/%.o)
 DEP := $(OBJ:.o=.d)
 
-FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h include/*.h tests/*.c)
+FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
 .PHONY: all clean distclean test memcheck format format-check lint lint-fix init
 
