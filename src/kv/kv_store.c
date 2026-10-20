@@ -35,7 +35,7 @@ int kv_store_get(kv_store *store, const char *key, const char **out_value, size_
   return hashmap_get(store->map, key, out_value, out_len);
 }
 
-int kv_store_put(kv_store *store, const char *key, const char value, size_t value_len ) {
+int kv_store_put(kv_store *store, const char *key, const char *value, size_t value_len ) {
   return hashmap_put(store->map, key, value, value_len);
 }
 

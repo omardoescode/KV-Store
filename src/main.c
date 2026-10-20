@@ -3,6 +3,8 @@
 
 #include "http/http.h"
 #include "json/json.h"
+#include "kv/kv_handlers.h"
+#include "kv/kv_store.h"
 
 #define ADDR "127.0.0.1:7890"
 
@@ -51,7 +53,13 @@ static void echo(http_response *w, const http_request *r, void *arg) {
 int main(void) {
   http_server *server = http_server_new();
   http_handle(server, HTTP_GET, "/ping", ping, NULL);
-  http_handle(server, HTTP_POST, "/echo", echo, NULL);
+
+  kv_store *store = kv_store_new();
+  if (!store) {
+    fprintf(stderr, "Failed to create kv_store.\n");
+    return 1;
+  }
+  kv_register_routes(server, store);
 
   int threads = http_default_threads();
 
@@ -59,5 +67,7 @@ int main(void) {
   if (http_listen_and_serve(server, ADDR, threads) != 0) {
     perror("http_listen_and_serve");
   }
+
+  kv_store_free(store);
   return 1;
 }

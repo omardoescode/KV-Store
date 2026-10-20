@@ -5,6 +5,8 @@ TARGET := $(BUILD_DIR)/app
 COMPDB := $(BUILD_DIR)/compile_commands.json
 
 CFLAGS := -std=c17 \
+		  -D_GNU_SOURCE \
+		  -pthread \
           -Wall -Wextra -Wpedantic \
           -Wshadow -Wconversion \
           -O2 -g -flto=auto
