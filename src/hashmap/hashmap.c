@@ -250,3 +250,30 @@ size_t hashmap_len(const hashmap *m) {
   pthread_rwlock_unlock(&mm->lock);
   return n;
 }
+
+int hashmap_foreach(const hashmap *m, hashmap_foreach_function function, void *arg) {
+  if (!m || !function) {
+    return -1;
+  }
+
+  // Cast away const to lock: the lock is a mutable part of a logically-const object
+  // (same reasoning as hashmap_get).
+  hashmap *mm = (hashmap *)m;
+
+  // Read lock: other readers (GETs) can proceed concurrently, but no PUT/DEL/resize can
+  // modify buckets or entries until the whole walk is finished.
+  pthread_rwlock_rdlock(&mm->lock);
+
+  int rc = 0;
+  // Visit every bucket, then every entry in that bucket's linked list.
+  for (size_t i = 0; i < m->bucket_count && rc == 0; i++) {
+    for (const hm_entry *e = m->buckets[i]; e && rc == 0; e = e->next) {
+      // Hand the entry to the caller. Pointers refer to the map's own storage and are
+      // only valid until the callback returns.
+      rc = function(e->key, e->key_len, e->val, e->val_len, arg);
+    }
+  }
+
+  pthread_rwlock_unlock(&mm->lock);
+  return rc;
+}

@@ -7,9 +7,19 @@
 // Keys and values are copied in on put; the map owns its storage until free. Values returned by
 // get are freshly allocated copies that the caller must free.
 //
-// Note: FNV-1a has no seed, so this map is not DoS-hardened against adversarial key collisions
+// Note: functionV-1a has no seed, so this map is not DoS-hardened against adversarial key collisions
 // over the network. A sip-hash swap is a reasonable future upgrade before exposing user input.
 typedef struct hashmap hashmap;
+
+/**
+ * Callback for hashmap_foreach, called once per entry.
+ * key is NUL-terminated (key_len excludes the '\0'); val may be NULL when val_len is 0.
+ * Both are borrowed: valid only during the call, so copy anything you need to keep.
+ * Return 0 to continue iterating, or nonzero to stop early.
+ */
+typedef int (*hashmap_foreach_function)(const char *key, size_t key_len, const void *val,
+                                  size_t val_len, void *arg);
+
 
 /** Allocate an empty map; return NULL on allocation failure. Free with hashmap_free. */
 hashmap *hashmap_new(void);
@@ -37,5 +47,16 @@ int hashmap_del(hashmap *m, const char *key);
 
 /** Return the number of entries in m, or 0 if m is NULL. */
 size_t hashmap_len(const hashmap *m);
+
+/**
+ * Call function for every entry in m, in no particular order, while holding the read lock.
+ * arg is passed through to every call unchanged.
+ * Returns 0 if every entry was visited, the callback's nonzero value if it stopped early,
+ * or -1 if m or function is NULL.
+ *
+ * The callback must not call any hashmap_* function on m: put/del would deadlock
+ * waiting for the write lock this function's read lock blocks.
+ */
+int hashmap_foreach(const hashmap *m, hashmap_foreach_function function, void *arg);
 
 #endif
