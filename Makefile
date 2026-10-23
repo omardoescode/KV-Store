@@ -28,7 +28,7 @@ H2O_CPPFLAGS := -isystem $(H2O_DIR)/include $(H2O_DEPS:%=-isystem $(H2O_DIR)/dep
 
 LDLIBS := $(YYJSON_OBJ) $(H2O_LIB) \
           $(shell pkg-config --libs openssl zlib 2>/dev/null || echo -lssl -lcrypto -lz) \
-          -lm -pthread
+          -lm
 
 SRC := $(wildcard src/*.c src/*/*.c)
 OBJ := $(SRC:src/%.c=$(BUILD_DIR)/%.o)
@@ -86,9 +86,9 @@ test: $(TARGET)
 HM_TEST_SRC := src/hashmap/hashmap.c tests/hashmap_test.c
 HM_TEST_BIN := $(BUILD_DIR)/hashmap_test
 
-$(HM_TEST_BIN): $(HM_TEST_SRC)
+$(HM_TEST_BIN): $(HM_TEST_SRC) src/hashmap/hashmap.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -pthread -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(HM_TEST_SRC) -o $@
 
 test-hashmap: $(HM_TEST_BIN)
 	./$(HM_TEST_BIN)

@@ -65,3 +65,11 @@ vgcore.*
 
 # Assignment PDF (keep locally, do not track)
 Assignment1.pdf
+
+# Runtime data
+kv.log
+kv_snapshot_persistence.txt
+*.db
+*.db-wal
+*.db-shm
+.env

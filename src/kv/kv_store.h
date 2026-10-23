@@ -9,12 +9,13 @@ kv_store *kv_store_new(const char *persistence_path);
 void kv_store_free(kv_store *store);
 
 /**
- * Stores a copy of value under the key. Returns 0 on success, -1 on error.
+ * Copy key's value into a new buffer the caller must free. Returns 1 on found, 0 on missing,
+ * -1 on error.
  */
 int kv_store_get(kv_store *store, const char *key, void **out_value, size_t *out_len);
 
 /**
- * Copy key's value into a new buffer the caller must free. Returns 1 on found, 0 on missing.
+ * Stores a copy of value under the key. Returns 0 on success, -1 on error.
  */
 int kv_store_put(kv_store *store, const char *key, const void *value, size_t value_len);
 
