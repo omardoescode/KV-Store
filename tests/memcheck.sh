@@ -30,12 +30,12 @@ expect() {
 
 for _ in 1 2 3; do
   expect 200 "$url/ping"
-  expect 404 -X POST "$url/ping"
+  expect 404 -X PUT "$url/ping"
   expect 404 "$url/no-such-path"
-  expect 200 -X POST -d '{"msg":"hello"}' "$url/echo"
-  expect 400 -X POST -d '{"msg":5}' "$url/echo"
-  expect 400 -X POST -d 'not json' "$url/echo"
-  expect 400 -X POST "$url/echo"
+  expect 200 -X PUT -d '{"msg":"hello"}' "$url/echo"
+  expect 400 -X PUT -d '{"msg":5}' "$url/echo"
+  expect 400 -X PUT -d 'not json' "$url/echo"
+  expect 400 -X PUT "$url/echo"
 done
 
 # The server has no shutdown path; valgrind reports at SIGTERM.
