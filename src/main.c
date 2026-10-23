@@ -21,12 +21,18 @@ int main(void) {
   http_server *server = http_server_new();
   http_handle(server, HTTP_GET, "/ping", ping, NULL);
 
+  FILE *log = fopen("kv.log", "a");
+  if (!log) {
+    perror("Could not open kv.log.\n");
+    return 1;
+  }
+
   kv_store *store = kv_store_new("kv_snapshot_persistence.txt");
   if (!store) {
     fprintf(stderr, "Failed to create kv_store.\n");
     return 1;
   }
-  kv_register_routes(server, store);
+  kv_register_routes(server, store, log);
 
   int threads = http_default_threads();
 
@@ -36,5 +42,6 @@ int main(void) {
   }
 
   kv_store_free(store);
+  fclose(log);
   return 1;
 }
