@@ -73,7 +73,9 @@ static int kv_store_load(kv_store *store) {
 int kv_store_save(kv_store *store) {
   char temp[4096];
   int n = snprintf(temp, sizeof(temp), "%s.temp", store->persistence_path);
-  if (n < 0 || (size_t)n >= sizeof(temp)) return -1;
+  if (n < 0 || (size_t)n >= sizeof(temp)) {
+    return -1;
+  }
 
   FILE *f = fopen(temp, "wb");
   if (!f) {

@@ -22,7 +22,9 @@ static void log_op(const char *op, http_str key, int status) {
   struct tm local_time;
   localtime_r(&current.tv_sec, &local_time);
   char when[32];
-  if (strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%S", &local_time) == 0) when[0] = '\0';
+  if (strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%S", &local_time) == 0) {
+    when[0] = '\0';
+  }
 
   // One fprintf per line: stdio locks the FILE per call, so lines from
   // concurrent threads never interleave. %.*s prints exactly key.len bytes
@@ -214,4 +216,4 @@ void kv_register_routes(http_server *server, kv_store *store, FILE *log) {
   http_handle(server, HTTP_GET, "/kv", kv_get_handler, store);
   http_handle(server, HTTP_PUT, "/kv", kv_put_handler, store);
   http_handle(server, HTTP_DELETE, "/kv", kv_del_handler, store);
-}
+} 
