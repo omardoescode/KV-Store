@@ -5,6 +5,8 @@ TARGET := $(BUILD_DIR)/app
 COMPDB := $(BUILD_DIR)/compile_commands.json
 
 CFLAGS := -std=c17 \
+		  -D_GNU_SOURCE \
+		  -pthread \
           -Wall -Wextra -Wpedantic \
           -Wshadow -Wconversion \
           -O2 -g -flto=auto
@@ -34,7 +36,7 @@ DEP := $(OBJ:.o=.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean test memcheck format format-check lint lint-fix init
+.PHONY: all clean distclean test test-hashmap memcheck format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET)
 
@@ -81,6 +83,16 @@ $(BUILD_DIR)/%.o: src/%.c | $(H2O_DIR)/CMakeLists.txt $(YYJSON_DIR)/src/yyjson.c
 test: $(TARGET)
 	./$(TARGET)
 
+HM_TEST_SRC := src/hashmap/hashmap.c tests/hashmap_test.c
+HM_TEST_BIN := $(BUILD_DIR)/hashmap_test
+
+$(HM_TEST_BIN): $(HM_TEST_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -pthread -o $@
+
+test-hashmap: $(HM_TEST_BIN)
+	./$(HM_TEST_BIN)
+
 memcheck: $(TARGET)
 	tests/memcheck.sh
 
@@ -110,7 +122,7 @@ init:
 	git config core.hooksPath .githooks
 
 clean:
-	rm -f $(TARGET) $(OBJ) $(DEP) $(YYJSON_OBJ)
+	rm -f $(TARGET) $(OBJ) $(DEP) $(YYJSON_OBJ) $(HM_TEST_BIN)
 
 distclean:
 	rm -rf $(BUILD_DIR)

@@ -62,3 +62,6 @@ build/
 
 # valgrind
 vgcore.*
+
+# Assignment PDF (keep locally, do not track)
+Assignment1.pdf
