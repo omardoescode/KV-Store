@@ -29,8 +29,8 @@ static void log_op(const char *op, http_str key, int status) {
   // One fprintf per line: stdio locks the FILE per call, so lines from
   // concurrent threads never interleave. %.*s prints exactly key.len bytes
   // (the key isn't NUL-terminated).
-  (void)fprintf(log_file, "%s.%03ld %s %.*s %d\n", when, current.tv_nsec / 1000000L, op, (int)key.len,
-          key.ptr, status);
+  (void)fprintf(log_file, "%s.%03ld %s %.*s %d\n", when, current.tv_nsec / 1000000L, op,
+                (int)key.len, key.ptr, status);
 }
 
 /**
@@ -216,4 +216,4 @@ void kv_register_routes(http_server *server, kv_store *store, FILE *log) {
   http_handle(server, HTTP_GET, "/kv", kv_get_handler, store);
   http_handle(server, HTTP_PUT, "/kv", kv_put_handler, store);
   http_handle(server, HTTP_DELETE, "/kv", kv_del_handler, store);
-} 
+}
