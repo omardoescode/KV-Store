@@ -290,8 +290,7 @@ static void test_concurrent(void) {
   assert(hashmap_len(m) == 0);
 
   hashmap_free(m);
-  printf("  test_concurrent OK (%llu reads during writes)\n",
-         (unsigned long long)total_reads);
+  printf("  test_concurrent OK (%llu reads during writes)\n", (unsigned long long)total_reads);
 }
 
 int main(void) {

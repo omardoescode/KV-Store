@@ -7,8 +7,9 @@
 // Keys and values are copied in on put; the map owns its storage until free. Values returned by
 // get are freshly allocated copies that the caller must free.
 //
-// Note: functionV-1a has no seed, so this map is not DoS-hardened against adversarial key collisions
-// over the network. A sip-hash swap is a reasonable future upgrade before exposing user input.
+// Note: functionV-1a has no seed, so this map is not DoS-hardened against adversarial key
+// collisions over the network. A sip-hash swap is a reasonable future upgrade before exposing user
+// input.
 typedef struct hashmap hashmap;
 
 /**
@@ -18,8 +19,7 @@ typedef struct hashmap hashmap;
  * Return 0 to continue iterating, or nonzero to stop early.
  */
 typedef int (*hashmap_foreach_function)(const char *key, size_t key_len, const void *val,
-                                  size_t val_len, void *arg);
-
+                                        size_t val_len, void *arg);
 
 /** Allocate an empty map; return NULL on allocation failure. Free with hashmap_free. */
 hashmap *hashmap_new(void);

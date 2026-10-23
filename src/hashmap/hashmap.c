@@ -39,7 +39,7 @@ static size_t hm_idx(uint64_t h, size_t bucket_count) {
 }
 
 static hm_entry *hm_find(const hashmap *m, const char *key, size_t key_len, uint64_t h,
-                        size_t *out_idx) {
+                         size_t *out_idx) {
   size_t idx = hm_idx(h, m->bucket_count);
   if (out_idx) {
     *out_idx = idx;

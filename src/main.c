@@ -2,9 +2,9 @@
 #include <stdlib.h>
 
 #include "http/http.h"
-#include "json/json.h"
 #include "kv/kv_handlers.h"
 #include "kv/kv_store.h"
+#include "json/json.h"
 
 #define ADDR "127.0.0.1:7890"
 

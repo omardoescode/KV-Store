@@ -1,9 +1,9 @@
+#include "kv_handlers.h"
+#include "kv_store.h"
+#include "json/json.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "json/json.h"
-#include "kv_handlers.h"
-#include "kv_store.h"
 
 static FILE *log_file = NULL;
 
@@ -12,7 +12,8 @@ static FILE *log_file = NULL;
  * "2026-10-22T21:15:03.412 GET key_144 200".
  */
 static void log_op(const char *op, http_str key, int status) {
-  if (!log_file) return;
+  if (!log_file)
+    return;
 
   struct timespec current;
   clock_gettime(CLOCK_REALTIME, &current);
@@ -25,10 +26,11 @@ static void log_op(const char *op, http_str key, int status) {
   // One fprintf per line: stdio locks the FILE per call, so lines from
   // concurrent threads never interleave. %.*s prints exactly key.len bytes
   // (the key isn't NUL-terminated).
-  fprintf(log_file, "%s.%03ld %s %.*s %d\n", when, current.tv_nsec / 1000000L, op, (int)key.len, key.ptr, status);
+  fprintf(log_file, "%s.%03ld %s %.*s %d\n", when, current.tv_nsec / 1000000L, op, (int)key.len,
+          key.ptr, status);
 }
 
-/** 
+/**
  * Log the operation, then send the response.
  */
 static void reply(http_response *response, const char *op, http_str key, int status,
@@ -42,105 +44,106 @@ static void reply(http_response *response, const char *op, http_str key, int sta
  * Return 0 or -1 if there is no key.
  */
 static int key_from_path(const http_request *request, http_str *key) {
-	static const char prefix[] = "/kv/";
-	const size_t n = sizeof(prefix) - 1;
-	http_str path = http_req_path(request);
-	// Reject the request if the path is "/kv" or "/kv/" with nothing after it,
-	// or if the path doesn't start with "/kv/".
-	if (path.len <= n || memcmp(path.ptr, prefix, n) != 0) return -1;
+  static const char prefix[] = "/kv/";
+  const size_t n = sizeof(prefix) - 1;
+  http_str path = http_req_path(request);
+  // Reject the request if the path is "/kv" or "/kv/" with nothing after it,
+  // or if the path doesn't start with "/kv/".
+  if (path.len <= n || memcmp(path.ptr, prefix, n) != 0)
+    return -1;
 
-	// Points the key at the bytes right after the "/kv/" prefix.
-	key->ptr = path.ptr + n;
-	key->len = path.len - n;
-	return 0;
+  // Points the key at the bytes right after the "/kv/" prefix.
+  key->ptr = path.ptr + n;
+  key->len = path.len - n;
+  return 0;
 }
 
 /**
  * Route the HTTP GET request to kv_store to then access the hashmap.
  */
 static void kv_get_handler(http_response *response, const http_request *request, void *arg) {
-	kv_store *store = arg;
-	
-	// Extract key from the URL.
-	http_str key = HTTP_STR("");
-	if (key_from_path(request, &key) != 0) {
-		static const char message[] = "Missing key\n";
-		reply(response, "GET", key, 400, message, sizeof(message) - 1);
-		return;
-	}
+  kv_store *store = arg;
 
-	// Make a NUL-terminated copy.
-	char *key_buf = malloc(key.len + 1);
-	if (!key_buf) {
-		reply(response, "GET", key, 500, NULL, 0);
-		return;
-	}
-	memcpy(key_buf, key.ptr, key.len);
-	key_buf[key.len] = '\0';
+  // Extract key from the URL.
+  http_str key = HTTP_STR("");
+  if (key_from_path(request, &key) != 0) {
+    static const char message[] = "Missing key\n";
+    reply(response, "GET", key, 400, message, sizeof(message) - 1);
+    return;
+  }
 
-	// Get the value.
-	void *value = NULL;
-	size_t value_len = 0;
-	int get_value = kv_store_get(store, key_buf, &value, &value_len);
+  // Make a NUL-terminated copy.
+  char *key_buf = malloc(key.len + 1);
+  if (!key_buf) {
+    reply(response, "GET", key, 500, NULL, 0);
+    return;
+  }
+  memcpy(key_buf, key.ptr, key.len);
+  key_buf[key.len] = '\0';
 
-	if (get_value == 0) { // key not found
-		free(key_buf);
-		static const char message[] = "Key not found.\n";
-		reply(response, "GET", key, 404, message, sizeof(message) - 1);
-		return;
-	}
-	if (get_value < 0) { // internal error
-		free(key_buf);
-		reply(response, "GET", key, 500, NULL, 0);
-		return;
-	}
+  // Get the value.
+  void *value = NULL;
+  size_t value_len = 0;
+  int get_value = kv_store_get(store, key_buf, &value, &value_len);
 
-	// Build the key-value dict.
-	json_builder *b = json_builder_new();
+  if (get_value == 0) { // key not found
+    free(key_buf);
+    static const char message[] = "Key not found.\n";
+    reply(response, "GET", key, 404, message, sizeof(message) - 1);
+    return;
+  }
+  if (get_value < 0) { // internal error
+    free(key_buf);
+    reply(response, "GET", key, 500, NULL, 0);
+    return;
+  }
+
+  // Build the key-value dict.
+  json_builder *b = json_builder_new();
   json_node *r = json_new_obj(b);
   json_put(b, r, "key", json_new_str(b, key_buf, key.len));
   json_put(b, r, "value", json_new_str(b, value, value_len));
   size_t len;
   char *bytes = json_to_bytes(r, &len);
 
-	// Send out one response
+  // Send out one response
   if (bytes != NULL) {
     http_set_header(response, HTTP_STR("content-type"), HTTP_STR("application/json"));
-		reply(response, "GET", key, 200, bytes, len);
+    reply(response, "GET", key, 200, bytes, len);
   } else {
-		reply(response, "GET", key, 500, NULL, 0);
+    reply(response, "GET", key, 500, NULL, 0);
   }
 
   free(bytes);
   json_builder_free(b);
-	free(value);
-	free(key_buf);
+  free(value);
+  free(key_buf);
 }
 
 /**
  * Route the HTTP PUT request to kv_store to then access the hashmap.
  */
 static void kv_put_handler(http_response *response, const http_request *request, void *arg) {
-	kv_store *store = arg;
+  kv_store *store = arg;
 
-	// Extract key from the URL.
-	http_str key = HTTP_STR("");
-	if (key_from_path(request, &key) != 0) {
-		static const char message[] = "Missing key\n";
-		http_write(response, 400, message, sizeof(message) - 1);
-		return;
-	}
+  // Extract key from the URL.
+  http_str key = HTTP_STR("");
+  if (key_from_path(request, &key) != 0) {
+    static const char message[] = "Missing key\n";
+    http_write(response, 400, message, sizeof(message) - 1);
+    return;
+  }
 
-	// Make a NUL-terminated copy.
-	char *key_buf = malloc(key.len + 1);
-	if (!key_buf) {
-		http_write(response, 500, NULL, 0);
-		return;
-	}
-	memcpy(key_buf, key.ptr, key.len);
-	key_buf[key.len] = '\0';
+  // Make a NUL-terminated copy.
+  char *key_buf = malloc(key.len + 1);
+  if (!key_buf) {
+    http_write(response, 500, NULL, 0);
+    return;
+  }
+  memcpy(key_buf, key.ptr, key.len);
+  key_buf[key.len] = '\0';
 
-	// Parse the body using value.
+  // Parse the body using value.
   http_str body = http_req_body(request);
   json_doc *doc = json_parse(body.ptr, body.len);
   size_t value_len;
@@ -148,65 +151,65 @@ static void kv_put_handler(http_response *response, const http_request *request,
   if (value == NULL) {
     json_doc_free(doc);
     static const char message[] = "want {\"value\": string}\n";
-		reply(response, "PUT", key, 400, message, sizeof(message) - 1);
-		free(key_buf);
+    reply(response, "PUT", key, 400, message, sizeof(message) - 1);
+    free(key_buf);
     return;
   }
 
-	// Put the value.
-	int put_value = kv_store_put(store, key_buf, value, value_len);
-	json_doc_free(doc);
-	free(key_buf);
+  // Put the value.
+  int put_value = kv_store_put(store, key_buf, value, value_len);
+  json_doc_free(doc);
+  free(key_buf);
 
-	if (put_value != 0) {
-		reply(response, "PUT", key, 500, NULL, 0);
-		return;
-	}
-	reply(response, "PUT", key, 200, NULL, 0);
+  if (put_value != 0) {
+    reply(response, "PUT", key, 500, NULL, 0);
+    return;
+  }
+  reply(response, "PUT", key, 200, NULL, 0);
 }
 
 /**
  * Route the HTTP DEL request to kv_store to then access the hashmap.
  */
 static void kv_del_handler(http_response *response, const http_request *request, void *arg) {
-	kv_store *store = arg;
+  kv_store *store = arg;
 
-	// Extract key from the URL.
-	http_str key = HTTP_STR("");
-	if (key_from_path(request, &key) != 0) {
-		static const char message[] = "Missing key\n";
-		http_write(response, 400, message, sizeof(message) - 1);
-		return;
-	}
+  // Extract key from the URL.
+  http_str key = HTTP_STR("");
+  if (key_from_path(request, &key) != 0) {
+    static const char message[] = "Missing key\n";
+    http_write(response, 400, message, sizeof(message) - 1);
+    return;
+  }
 
-	// Make a NUL-terminated copy.
-	char *key_buf = malloc(key.len + 1);
-	if (!key_buf) {
-		http_write(response, 500, NULL, 0);
-		return;
-	}
-	memcpy(key_buf, key.ptr, key.len);
-	key_buf[key.len] = '\0';
+  // Make a NUL-terminated copy.
+  char *key_buf = malloc(key.len + 1);
+  if (!key_buf) {
+    http_write(response, 500, NULL, 0);
+    return;
+  }
+  memcpy(key_buf, key.ptr, key.len);
+  key_buf[key.len] = '\0';
 
-	// Delete the value.
-	int del_value = kv_store_del(store, key_buf);
-	free(key_buf);
+  // Delete the value.
+  int del_value = kv_store_del(store, key_buf);
+  free(key_buf);
 
-	if (del_value == 0) { // key not found
-		static const char message[] = "Key not found.\n";
-		reply(response, "DEL", key, 404, message, sizeof(message) - 1);
-		return;
-	}
-	if (del_value < 0) {
-		reply(response, "DEL", key, 500, NULL, 0);
-		return;
-	}
-	reply(response, "DEL", key, 200, NULL, 0);
+  if (del_value == 0) { // key not found
+    static const char message[] = "Key not found.\n";
+    reply(response, "DEL", key, 404, message, sizeof(message) - 1);
+    return;
+  }
+  if (del_value < 0) {
+    reply(response, "DEL", key, 500, NULL, 0);
+    return;
+  }
+  reply(response, "DEL", key, 200, NULL, 0);
 }
 
 void kv_register_routes(http_server *server, kv_store *store, FILE *log) {
-	log_file = log;
-	http_handle(server, HTTP_GET, "/kv", kv_get_handler, store);
-	http_handle(server, HTTP_PUT, "/kv", kv_put_handler, store);
-	http_handle(server, HTTP_DELETE, "/kv", kv_del_handler, store);
+  log_file = log;
+  http_handle(server, HTTP_GET, "/kv", kv_get_handler, store);
+  http_handle(server, HTTP_PUT, "/kv", kv_put_handler, store);
+  http_handle(server, HTTP_DELETE, "/kv", kv_del_handler, store);
 }
