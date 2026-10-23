@@ -12,8 +12,9 @@ static FILE *log_file = NULL;
  * "2026-10-22T21:15:03.412 GET key_144 200".
  */
 static void log_op(const char *op, http_str key, int status) {
-  if (!log_file)
+  if (!log_file) {
     return;
+  }
 
   struct timespec current;
   clock_gettime(CLOCK_REALTIME, &current);
@@ -21,12 +22,12 @@ static void log_op(const char *op, http_str key, int status) {
   struct tm local_time;
   localtime_r(&current.tv_sec, &local_time);
   char when[32];
-  strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%S", &local_time);
+  if (strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%S", &local_time) == 0) when[0] = '\0';
 
   // One fprintf per line: stdio locks the FILE per call, so lines from
   // concurrent threads never interleave. %.*s prints exactly key.len bytes
   // (the key isn't NUL-terminated).
-  fprintf(log_file, "%s.%03ld %s %.*s %d\n", when, current.tv_nsec / 1000000L, op, (int)key.len,
+  (void)fprintf(log_file, "%s.%03ld %s %.*s %d\n", when, current.tv_nsec / 1000000L, op, (int)key.len,
           key.ptr, status);
 }
 
@@ -49,8 +50,9 @@ static int key_from_path(const http_request *request, http_str *key) {
   http_str path = http_req_path(request);
   // Reject the request if the path is "/kv" or "/kv/" with nothing after it,
   // or if the path doesn't start with "/kv/".
-  if (path.len <= n || memcmp(path.ptr, prefix, n) != 0)
+  if (path.len <= n || memcmp(path.ptr, prefix, n) != 0) {
     return -1;
+  }
 
   // Points the key at the bytes right after the "/kv/" prefix.
   key->ptr = path.ptr + n;

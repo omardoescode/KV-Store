@@ -35,7 +35,7 @@ static uint64_t hm_hash(const char *key, size_t key_len) {
 }
 
 static size_t hm_idx(uint64_t h, size_t bucket_count) {
-  return (size_t)(h & (uint64_t)(bucket_count - 1u));
+  return (size_t)(h & (uint64_t)(bucket_count - 1U));
 }
 
 static hm_entry *hm_find(const hashmap *m, const char *key, size_t key_len, uint64_t h,
@@ -54,7 +54,7 @@ static hm_entry *hm_find(const hashmap *m, const char *key, size_t key_len, uint
 
 // Assumes the write lock is held. Doubles the bucket array and rehashes.
 static int hm_resize_locked(hashmap *m) {
-  size_t new_count = m->bucket_count * 2u;
+  size_t new_count = m->bucket_count * 2U;
   hm_entry **new_buckets = calloc(new_count, sizeof(*new_buckets));
   if (!new_buckets) {
     return -1;
