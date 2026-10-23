@@ -14,9 +14,43 @@
 #include "h2o.h"
 #include "http/router.h"
 
+typedef struct {
+  http_middleware fn;
+  void *ctx;
+} middleware;
+
+typedef struct {
+  middleware *items;
+  size_t count;
+} middleware_list;
+
+struct http_group {
+  http_server *server;
+  char *prefix;
+  middleware_list middleware;
+  http_group *next;
+};
+
+// The route arg: the handler arg and the group of the route, or NULL.
+typedef struct binding {
+  void *arg;
+  const http_group *group;
+  struct binding *next;
+} binding;
+
 struct http_server {
   h2o_globalconf_t config;
   router routes;
+  middleware_list middleware;
+  http_group *groups;
+  binding *bindings;
+};
+
+// The rest of the middleware chain of one request: server middleware, then group middleware.
+struct http_chain {
+  const http_server *server;
+  const route *rt;
+  size_t next;
 };
 
 struct http_request {
@@ -66,6 +100,22 @@ static int method_of(h2o_iovec_t name) {
   return -1;
 }
 
+/** Run middleware number c->next of the chain, or the handler after the last one. */
+static void run_chain(http_response *w, const http_request *r, http_chain *c) {
+  const binding *b = c->rt->arg;
+  size_t i = c->next++;
+  const middleware_list *list = &c->server->middleware;
+  if (i >= list->count && b->group != NULL) {
+    i -= list->count;
+    list = &b->group->middleware;
+  }
+  if (i < list->count) {
+    list->items[i].fn(w, r, run_chain, c, list->items[i].ctx);
+    return;
+  }
+  c->rt->fn(w, r, b->arg);
+}
+
 /** Dispatch to the first route that matches path and method; return -1 if none. */
 static int on_req(h2o_handler_t *self, h2o_req_t *req) {
   const http_server *s = ((dispatcher *)self)->server;
@@ -86,7 +136,8 @@ static int on_req(h2o_handler_t *self, h2o_req_t *req) {
     return -1;
   }
   struct http_request r = {req, rt, values};
-  rt->fn((http_response *)req, &r, rt->arg);
+  http_chain c = {s, rt, 0};
+  run_chain((http_response *)req, &r, &c);
   return 0;
 }
 
@@ -94,6 +145,9 @@ static int on_req(h2o_handler_t *self, h2o_req_t *req) {
 http_server *http_server_new(void) {
   http_server *s = h2o_mem_alloc(sizeof(*s));
   s->routes = (router){NULL, 0, 0};
+  s->middleware = (middleware_list){NULL, 0};
+  s->groups = NULL;
+  s->bindings = NULL;
   h2o_config_init(&s->config);
   // No "Server" header: H2O formats it with sprintf on each response.
   s->config.server_name = (h2o_iovec_t){NULL, 0};
@@ -109,19 +163,82 @@ http_server *http_server_new(void) {
   return s;
 }
 
-/** Free the routes and the H2O configuration of a server that no event loop runs. */
+/** Free the routes, groups, middleware, and H2O configuration of a server no loop runs. */
 void http_server_free(http_server *s) {
   router_free(&s->routes);
+  while (s->bindings != NULL) {
+    binding *b = s->bindings;
+    s->bindings = b->next;
+    free(b);
+  }
+  while (s->groups != NULL) {
+    http_group *g = s->groups;
+    s->groups = g->next;
+    free(g->prefix);
+    free(g->middleware.items);
+    free(g);
+  }
+  free(s->middleware.items);
   h2o_config_dispose(&s->config);
   free(s);
+}
+
+/** Register handler with a binding to group; abort with a message if path is malformed. */
+static void add_route(http_server *s, http_method method, const char *path, http_handler handler,
+                      void *arg, const http_group *group) {
+  binding *b = h2o_mem_alloc(sizeof(*b));
+  *b = (binding){arg, group, s->bindings};
+  s->bindings = b;
+  if (router_add(&s->routes, method, path, handler, b) != 0) {
+    h2o_fatal("http_handle: invalid route pattern \"%s\"", path);
+  }
 }
 
 /** Register a method handler on a path pattern; abort with a message if it is malformed. */
 void http_handle(http_server *s, http_method method, const char *path, http_handler handler,
                  void *arg) {
-  if (router_add(&s->routes, method, path, handler, arg) != 0) {
-    h2o_fatal("http_handle: invalid route pattern \"%s\"", path);
+  add_route(s, method, path, handler, arg, NULL);
+}
+
+/** Allocate a group with a copy of prefix; abort with a message if prefix is malformed. */
+http_group *http_group_new(http_server *s, const char *prefix) {
+  size_t len = strlen(prefix);
+  if (len < 2 || prefix[0] != '/' || prefix[len - 1] == '/') {
+    h2o_fatal("http_group_new: invalid prefix \"%s\"", prefix);
   }
+  http_group *g = h2o_mem_alloc(sizeof(*g));
+  *g = (http_group){s, h2o_strdup(NULL, prefix, len).base, {NULL, 0}, s->groups};
+  s->groups = g;
+  return g;
+}
+
+/** Register handler on the group prefix followed by path. */
+void http_group_handle(http_group *g, http_method method, const char *path, http_handler handler,
+                       void *arg) {
+  if (path[0] != '/') {
+    h2o_fatal("http_group_handle: invalid route pattern \"%s\"", path);
+  }
+  char *full = h2o_concat(NULL, h2o_iovec_init(g->prefix, strlen(g->prefix)),
+                          h2o_iovec_init(path, strlen(path)))
+                   .base;
+  add_route(g->server, method, full, handler, arg, g);
+  free(full);
+}
+
+/** Append mw to list, aborting if allocation fails. */
+static void middleware_add(middleware_list *list, http_middleware mw, void *ctx) {
+  list->items = h2o_mem_realloc(list->items, sizeof(*list->items) * (list->count + 1));
+  list->items[list->count++] = (middleware){mw, ctx};
+}
+
+/** Append mw to the middleware of g. */
+void http_group_use(http_group *g, http_middleware mw, void *ctx) {
+  middleware_add(&g->middleware, mw, ctx);
+}
+
+/** Append mw to the middleware of s. */
+void http_use(http_server *s, http_middleware mw, void *ctx) {
+  middleware_add(&s->middleware, mw, ctx);
 }
 
 /** Drain pending connections into the worker context, ignoring listener error callbacks. */
@@ -405,6 +522,9 @@ static const char *reason_of(int status) {
     return "Unknown";
   }
 }
+
+/** Return the status set by http_write; H2O starts each request with status 0. */
+int http_resp_status(const http_response *w) { return ((const h2o_req_t *)w)->res.status; }
 
 /** Send the final response with status and len bytes of body; call once per request. */
 void http_write(http_response *w, int status, const void *body, size_t len) {

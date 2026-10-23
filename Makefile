@@ -40,7 +40,7 @@ DEP := $(OBJ:.o=.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean run test test-hashmap test-router memcheck format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log memcheck format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET)
 
@@ -116,7 +116,17 @@ $(ROUTER_TEST_BIN): $(ROUTER_TEST_SRC) src/http/router.h src/http/http.h
 test-router: $(ROUTER_TEST_BIN)
 	./$(ROUTER_TEST_BIN)
 
-TEST_BINS := $(HM_TEST_BIN) $(ROUTER_TEST_BIN)
+LOG_TEST_SRC := src/log/log_ring.c src/log/async_log.c tests/log_test.c
+LOG_TEST_BIN := $(BUILD_DIR)/log_test
+
+$(LOG_TEST_BIN): $(LOG_TEST_SRC) src/log/log.h src/log/log_ring.h src/log/async_log.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LOG_TEST_SRC) -o $@
+
+test-log: $(LOG_TEST_BIN)
+	./$(LOG_TEST_BIN)
+
+TEST_BINS := $(HM_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN)
 
 test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do ./$$t; done
