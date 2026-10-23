@@ -23,7 +23,8 @@ The pre-commit hook checks format, runs clang-tidy on staged files, and runs `ma
 | Command | Function |
 |---|---|
 | `make` | Build `build/app`, write `build/compile_commands.json` for clangd |
-| `make test` | Build and run the server on `127.0.0.1:7890` (`curl 127.0.0.1:7890/ping`) |
+| `make run` | Build and run the server on `127.0.0.1:7890` (`curl 127.0.0.1:7890/ping`) |
+| `make test` | Build and run all unit tests, stop on the first failure |
 | `make memcheck` | Run the server under valgrind, send requests, fail on a memory error or leak. Port 7890 must be free |
 | `make format` | Format sources |
 | `make format-check` | Check format, no changes |

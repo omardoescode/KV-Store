@@ -40,7 +40,7 @@ DEP := $(OBJ:.o=.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean test test-hashmap test-router memcheck format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router memcheck format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET)
 
@@ -93,7 +93,7 @@ $(BUILD_DIR)/%.o: src/%.c | $(H2O_DIR)/CMakeLists.txt $(YYJSON_DIR)/src/yyjson.c
 
 -include $(DEP)
 
-test: $(TARGET)
+run: $(TARGET)
 	./$(TARGET)
 
 HM_TEST_SRC := src/hashmap/hashmap.c tests/hashmap_test.c
@@ -116,25 +116,33 @@ $(ROUTER_TEST_BIN): $(ROUTER_TEST_SRC) src/http/router.h src/http/http.h
 test-router: $(ROUTER_TEST_BIN)
 	./$(ROUTER_TEST_BIN)
 
+TEST_BINS := $(HM_TEST_BIN) $(ROUTER_TEST_BIN)
+
+test: $(TEST_BINS)
+	@set -e; for t in $(TEST_BINS); do ./$$t; done
+
 memcheck: $(TARGET)
 	tests/memcheck.sh
 
+CLANG_FORMAT ?= clang-format
+CLANG_TIDY ?= clang-tidy
+
 format:
-	clang-format -i $(FMT_FILES)
+	$(CLANG_FORMAT) -i $(FMT_FILES)
 
 format-check:
-	clang-format --dry-run --Werror $(FMT_FILES)
+	$(CLANG_FORMAT) --dry-run --Werror $(FMT_FILES)
 
 lint:
-	clang-tidy --quiet $(TIDYFLAGS) $(SRC) -- $(CPPFLAGS) $(H2O_CPPFLAGS) $(YYJSON_CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS)
+	$(CLANG_TIDY) --quiet $(TIDYFLAGS) $(SRC) -- $(CPPFLAGS) $(H2O_CPPFLAGS) $(YYJSON_CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS)
 
 lint-fix:
-	clang-tidy --quiet --fix $(TIDYFLAGS) $(SRC) -- $(CPPFLAGS) $(H2O_CPPFLAGS) $(YYJSON_CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS)
+	$(CLANG_TIDY) --quiet --fix $(TIDYFLAGS) $(SRC) -- $(CPPFLAGS) $(H2O_CPPFLAGS) $(YYJSON_CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS)
 
 init:
 	@command -v gcc >/dev/null || { echo "init: gcc not installed" >&2; exit 1; }
-	@command -v clang-format >/dev/null || { echo "init: clang-format not installed" >&2; exit 1; }
-	@command -v clang-tidy >/dev/null || { echo "init: clang-tidy not installed" >&2; exit 1; }
+	@command -v $(CLANG_FORMAT) >/dev/null || { echo "init: clang-format not installed" >&2; exit 1; }
+	@command -v $(CLANG_TIDY) >/dev/null || { echo "init: clang-tidy not installed" >&2; exit 1; }
 	@command -v cmake >/dev/null || { echo "init: cmake not installed" >&2; exit 1; }
 	@command -v c++ >/dev/null || { echo "init: C++ compiler not installed (H2O build)" >&2; exit 1; }
 	@command -v pkg-config >/dev/null || { echo "init: pkg-config not installed" >&2; exit 1; }
@@ -145,7 +153,7 @@ init:
 	git config core.hooksPath .githooks
 
 clean:
-	rm -f $(TARGET) $(OBJ) $(DEP) $(YYJSON_OBJ) $(SIPHASH_OBJ) $(HM_TEST_BIN) $(ROUTER_TEST_BIN)
+	rm -f $(TARGET) $(OBJ) $(DEP) $(YYJSON_OBJ) $(SIPHASH_OBJ) $(TEST_BINS)
 
 distclean:
 	rm -rf $(BUILD_DIR)
