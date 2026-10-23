@@ -5,7 +5,8 @@
 
 typedef struct kv_store kv_store;
 
-kv_store *kv_store_new(const char *persistence_path);
+/** Load persistence_path and snapshot changes to it every flush_interval_ms (>= 1). */
+kv_store *kv_store_new(const char *persistence_path, int flush_interval_ms);
 void kv_store_free(kv_store *store);
 
 /**

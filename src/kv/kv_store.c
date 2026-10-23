@@ -1,6 +1,7 @@
 #include "kv_store.h"
 #include "hashmap/hashmap.h"
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -8,11 +9,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 struct kv_store {
   hashmap *map;
   char *persistence_path;
+  int flush_interval_ms;
   pthread_t bckgrd_thread;
   atomic_bool dirty_flag;
   atomic_bool stop;
@@ -71,7 +74,7 @@ static int kv_store_load(kv_store *store) {
 }
 
 int kv_store_save(kv_store *store) {
-  char temp[4096];
+  char temp[PATH_MAX];
   int n = snprintf(temp, sizeof(temp), "%s.temp", store->persistence_path);
   if (n < 0 || (size_t)n >= sizeof(temp)) {
     return -1;
@@ -96,8 +99,12 @@ int kv_store_save(kv_store *store) {
 // Background thread that saves to the snapshot file if anything changed.
 static void *snapshot_loop(void *arg) {
   kv_store *store = arg;
+  struct timespec interval = {
+      .tv_sec = store->flush_interval_ms / 1000,
+      .tv_nsec = (long)(store->flush_interval_ms % 1000) * 1000000,
+  };
   while (!atomic_load(&store->stop)) {
-    usleep(100000);
+    nanosleep(&interval, NULL);
     if (atomic_exchange(&store->dirty_flag, false)) {
       kv_store_save(store);
     }
@@ -105,11 +112,12 @@ static void *snapshot_loop(void *arg) {
   return NULL;
 }
 
-kv_store *kv_store_new(const char *persistence_path) {
+kv_store *kv_store_new(const char *persistence_path, int flush_interval_ms) {
   kv_store *store = calloc(1, sizeof(*store));
   if (!store) {
     return NULL;
   }
+  store->flush_interval_ms = flush_interval_ms;
 
   store->map = hashmap_new();
   store->persistence_path = strdup(persistence_path);

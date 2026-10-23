@@ -73,3 +73,6 @@ kv_snapshot_persistence.txt
 *.db-wal
 *.db-shm
 .env
+
+# Local runtime data (DB, logs)
+in/

@@ -40,7 +40,7 @@ DEP := $(OBJ:.o=.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean run test test-hashmap test-router test-log memcheck format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log test-config memcheck format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET)
 
@@ -94,7 +94,9 @@ $(BUILD_DIR)/%.o: src/%.c | $(H2O_DIR)/CMakeLists.txt $(YYJSON_DIR)/src/yyjson.c
 -include $(DEP)
 
 run: $(TARGET)
-	./$(TARGET)
+	@[ -f ./.env ] || { echo "run: ./.env not found; run 'cp .env.example .env'" >&2; exit 1; }
+	@mkdir -p in
+	@set -a; . ./.env; set +a; exec ./$(TARGET)
 
 HM_TEST_SRC := src/hashmap/hashmap.c tests/hashmap_test.c
 HM_TEST_BIN := $(BUILD_DIR)/hashmap_test
@@ -126,7 +128,17 @@ $(LOG_TEST_BIN): $(LOG_TEST_SRC) src/log/log.h src/log/log_ring.h src/log/async_
 test-log: $(LOG_TEST_BIN)
 	./$(LOG_TEST_BIN)
 
-TEST_BINS := $(HM_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN)
+CONFIG_TEST_SRC := src/config/config.c tests/config_test.c
+CONFIG_TEST_BIN := $(BUILD_DIR)/config_test
+
+$(CONFIG_TEST_BIN): $(CONFIG_TEST_SRC) src/config/config.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CONFIG_TEST_SRC) -o $@
+
+test-config: $(CONFIG_TEST_BIN)
+	./$(CONFIG_TEST_BIN)
+
+TEST_BINS := $(HM_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN)
 
 test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do ./$$t; done

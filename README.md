@@ -17,13 +17,19 @@ After clone, run the following command to make sure all needed commands are inst
 make init
 ```
 
+Before `make run`, create the env file. `KV_LISTEN_ADDR`, `KV_LOG_PATH` and `KV_DB_PATH` are required; `.env.example` lists all keys. Local DB and log go in `./in/` (gitignored, `make run` creates it); `KV_LOG_PATH=-` logs to stdout:
+
+```sh
+cp .env.example .env
+```
+
 The pre-commit hook checks format, runs clang-tidy on staged files, and runs `make memcheck`. CI (`.github/workflows/ci.yml`) runs the same checks on each pull request.
 
 
 | Command | Function |
 |---|---|
 | `make` | Build `build/app`, write `build/compile_commands.json` for clangd |
-| `make run` | Build and run the server on `127.0.0.1:7890` (`curl 127.0.0.1:7890/ping`) |
+| `make run` | Build and run the server with env from `./.env` (`curl 127.0.0.1:7890/ping`) |
 | `make test` | Build and run all unit tests, stop on the first failure |
 | `make memcheck` | Run the server under valgrind, send requests, fail on a memory error or leak. Port 7890 must be free |
 | `make format` | Format sources |

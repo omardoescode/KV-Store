@@ -3,7 +3,10 @@
 # a memory error, or a definite leak.
 set -eu
 
-url=http://127.0.0.1:7890
+export KV_LISTEN_ADDR="${KV_LISTEN_ADDR:-127.0.0.1:7890}"
+export KV_LOG_PATH="${KV_LOG_PATH:-kv.log}"
+export KV_DB_PATH="${KV_DB_PATH:-kv.db}"
+url=http://$KV_LISTEN_ADDR
 log=$(mktemp)
 
 valgrind --leak-check=full --errors-for-leak-kinds=definite --log-file="$log" ./build/app >/dev/null &
