@@ -29,13 +29,28 @@ expect() {
 }
 
 for _ in 1 2 3; do
+  # Ping and routing
   expect 200 "$url/ping"
   expect 404 -X PUT "$url/ping"
   expect 404 "$url/no-such-path"
-  expect 200 -X PUT -d '{"msg":"hello"}' "$url/echo"
-  expect 400 -X PUT -d '{"msg":5}' "$url/echo"
-  expect 400 -X PUT -d 'not json' "$url/echo"
-  expect 400 -X PUT "$url/echo"
+
+  # Normal lifecycle: put, get, overwrite, get, delete, then it's gone
+  expect 200 -X PUT -d '{"value":"hello"}' "$url/kv/test"
+  expect 200 "$url/kv/test"
+  expect 200 -X PUT -d '{"value":"world"}' "$url/kv/test"
+  expect 200 "$url/kv/test"
+  expect 200 -X DELETE "$url/kv/test"
+  expect 404 "$url/kv/test"
+  expect 404 -X DELETE "$url/kv/test"
+
+  # Bad input to PUT
+  expect 400 -X PUT -d '{"value":5}' "$url/kv/test"
+  expect 400 -X PUT -d 'not json' "$url/kv/test"
+  expect 400 -X PUT "$url/kv/test"
+
+  # Missing key in the path
+  expect 400 "$url/kv"
+  expect 400 "$url/kv/"
 done
 
 # The server has no shutdown path; valgrind reports at SIGTERM.
