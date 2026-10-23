@@ -1,5 +1,5 @@
 #!/bin/sh
-# Starts the server, PUTs a value, stops it with a signal at once, restarts it, and fails if
+# Starts the server, POSTs a value, stops it with a signal at once, restarts it, and fails if
 # the value is gone. The long flush interval leaves the value to the shutdown flush.
 # Then checks that a locked database makes the stop fail fast with a nonzero status, and that a
 # second signal ends a stop that waits on an open request.
@@ -19,7 +19,7 @@ start() {
   ./build/app >/dev/null &
   pid=$!
   tries=0
-  until curl -sf -o /dev/null "$url/ping"; do
+  until [ "$(curl -s -o /dev/null -w '%{http_code}' "$url/")" != 000 ]; do
     tries=$((tries + 1))
     if [ "$tries" -ge 50 ] || ! kill -0 "$pid" 2>/dev/null; then
       echo "shutdown_test: server did not start" >&2
@@ -46,21 +46,21 @@ stop() {
 
 for sig in TERM INT; do
   start
-  got=$(curl -s -o /dev/null -w '%{http_code}' -X PUT -d "{\"value\":\"$sig\"}" "$url/kv/k")
-  [ "$got" = 200 ] || { echo "shutdown_test: PUT got $got" >&2; exit 1; }
+  got=$(curl -s -o /dev/null -w '%{http_code}' -X POST -d "{\"value\":\"$sig\"}" "$url/k")
+  [ "$got" = 200 ] || { echo "shutdown_test: POST got $got" >&2; exit 1; }
   stop "$sig" 0 5
 
   start
-  body=$(curl -s "$url/kv/k")
+  body=$(curl -s "$url/k")
   stop TERM 0 5
   case $body in
   *"\"$sig\""*) ;;
-  *) echo "shutdown_test: after SIG$sig restart, GET /kv/k = $body" >&2; exit 1 ;;
+  *) echo "shutdown_test: after SIG$sig restart, GET /k = $body" >&2; exit 1 ;;
   esac
 done
 
 start
-curl -s -o /dev/null -X PUT -d '{"value":"lost"}' "$url/kv/lost"
+curl -s -o /dev/null -X POST -d '{"value":"lost"}' "$url/lost"
 (echo 'BEGIN IMMEDIATE;'; sleep 10) | sqlite3 "$KV_DB_PATH" &
 helper=$!
 sleep 0.5
@@ -69,7 +69,7 @@ kill "$helper" 2>/dev/null || true
 helper=
 
 start
-head -c 100 /dev/zero | curl -s -o /dev/null -X PUT --limit-rate 1 --data-binary @- "$url/kv/slow" &
+head -c 100 /dev/zero | curl -s -o /dev/null -X POST --limit-rate 1 --data-binary @- "$url/slow" &
 helper=$!
 sleep 0.5
 kill -TERM "$pid"

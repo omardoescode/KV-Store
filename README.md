@@ -5,7 +5,7 @@ A unecessarily elaborate KV Store. Might be better than DynamoDB
 
 Requires `gcc`, a C++ compiler (only for the H2O build), `make`, `clang-format`, `clang-tidy`, `cmake`, `pkg-config`, `valgrind`, `curl`, the `sqlite3` CLI, and the OpenSSL, zlib and SQLite 3 development files.
 
-Persistence: the hashmap in memory serves reads. A writer thread commits each PUT/DEL to the SQLite database at `KV_DB_PATH` (WAL, `synchronous=FULL`) every `KV_FLUSH_INTERVAL_MS`; a failed commit is kept and retried. At start the server loads all rows into memory.
+Persistence: the hashmap in memory serves reads. A writer thread commits each POST/DELETE to the SQLite database at `KV_DB_PATH` (WAL, `synchronous=FULL`) every `KV_FLUSH_INTERVAL_MS`; a failed commit is kept and retried. At start the server loads all rows into memory.
 
 HTTP server: [H2O](https://github.com/h2o/h2o) (`libh2o-evloop`), a git submodule in `third_party/h2o`. `make` builds it with CMake into `build/h2o/`. Supported: Linux, macOS, BSD.
 
@@ -31,9 +31,9 @@ The pre-commit hook checks format, runs clang-tidy on staged files, and runs `ma
 | Command | Function |
 |---|---|
 | `make` | Build `build/app`, write `build/compile_commands.json` for clangd |
-| `make run` | Build and run the server with env from `./.env` (`curl 127.0.0.1:7890/ping`) |
-| `make test` | Build and run all unit tests, then `tests/shutdown_test.sh`, which starts `build/app`; stop on the first failure. Needs `curl`, `sqlite3`, and a free port 7891 (set `KV_LISTEN_ADDR` to change it) |
-| `make memcheck` | Run the server under valgrind, send requests, fail on a memory error or leak. Port 7890 must be free |
+| `make run` | Build and run the server with env from `./.env` (`curl -d '{"value":"v"}' 127.0.0.1:7890/k; curl 127.0.0.1:7890/k`) |
+| `make test` | Build and run all unit tests, then `tests/http_test.sh` (HTTP status/body checks) and `tests/shutdown_test.sh`, which start `build/app`; stop on the first failure. Needs `curl`, `sqlite3`, and free ports 7891 and 7892 (set `KV_LISTEN_ADDR` to change them) |
+| `make memcheck` | Run `tests/http_test.sh` with the server under valgrind, fail on a memory error or leak. Port 7890 must be free |
 | `make bench` | Stress test and profile the server, see [Benchmark](#benchmark). Pass options with `BENCH_ARGS='...'` |
 | `make format` | Format sources |
 | `make format-check` | Check format, no changes |
@@ -49,7 +49,8 @@ Multi-stage build (Debian bookworm): builds `build/app` from the checked-out sou
 ```sh
 docker build -t kv-store .
 docker run -d --name kv -p 7890:7890 -v kv-data:/data kv-store
-curl 127.0.0.1:7890/ping
+curl -d '{"value":"v"}' 127.0.0.1:7890/k
+curl 127.0.0.1:7890/k
 docker logs -f kv
 docker stop kv
 ```

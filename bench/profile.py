@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -59,8 +60,10 @@ def parse_args():
 
 def ping(base_url):
     try:
-        with urllib.request.urlopen(base_url + '/ping', timeout=1) as r:
-            return r.status == 200
+        with urllib.request.urlopen(base_url + '/', timeout=1):
+            return True
+    except urllib.error.HTTPError:
+        return True
     except OSError:
         return False
 
@@ -207,7 +210,7 @@ def run_mix(args, read_pct, run_dir):
                     sys.exit(f'profile: server did not start, see {mix_dir}/server.out')
                 time.sleep(0.1)
         elif not ping(base_url):
-            sys.exit(f'profile: no server answers on {base_url}/ping')
+            sys.exit(f'profile: no server answers on {base_url}')
 
         print(f'[mix {read_pct}] preload {args.keys} keys', flush=True)
         proc, log = run_k6(args, base_url, read_pct, {'MODE': 'step', 'RATE': '1', 'DURATION': '1s', 'PRELOAD': '1'},

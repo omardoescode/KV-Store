@@ -157,6 +157,7 @@ test-shutdown: $(TARGET)
 
 test: $(TEST_BINS) $(TARGET)
 	@set -e; for t in $(TEST_BINS); do ./$$t; done
+	tests/http_test.sh
 	tests/shutdown_test.sh
 
 memcheck: $(TARGET)

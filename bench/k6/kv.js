@@ -81,35 +81,35 @@ function zipfKey() {
 }
 
 const body = JSON.stringify({ value: 'x'.repeat(VALUE_SIZE) });
-const putParams = (tags) => ({ headers: { 'Content-Type': 'application/json' }, tags });
+const postParams = (tags) => ({ headers: { 'Content-Type': 'application/json' }, tags });
 
 export function setup() {
   if (!PRELOAD) {
     return;
   }
-  const params = putParams({ op: 'preload', name: 'kv' });
+  const params = postParams({ op: 'preload', name: 'kv' });
   for (let i = 0; i < KEYS; i += 200) {
     const batch = [];
     for (let k = i; k < Math.min(i + 200, KEYS); k++) {
-      batch.push(['PUT', `${BASE_URL}/kv/key_${k}`, body, params]);
+      batch.push(['POST', `${BASE_URL}/key_${k}`, body, params]);
     }
     for (const res of http.batch(batch)) {
       if (res.status !== 200) {
-        throw new Error(`preload PUT ${res.url}: status ${res.status}`);
+        throw new Error(`preload POST ${res.url}: status ${res.status}`);
       }
     }
   }
 }
 
 const readParams = { tags: { op: 'read', phase: 'main', name: 'kv' } };
-const writeParams = putParams({ op: 'write', phase: 'main', name: 'kv' });
+const writeParams = postParams({ op: 'write', phase: 'main', name: 'kv' });
 
 export default function () {
-  const url = `${BASE_URL}/kv/${zipfKey()}`;
+  const url = `${BASE_URL}/${zipfKey()}`;
   if (Math.random() * 100 < READ_PCT) {
     http.get(url, readParams);
   } else {
-    http.put(url, body, writeParams);
+    http.post(url, body, writeParams);
   }
 }
 

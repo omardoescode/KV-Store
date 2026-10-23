@@ -6,7 +6,7 @@
 #include "log/log.h"
 
 /**
- * Register GET/PUT/DELETE handlers for /kv/<key> on server, backed by store.
+ * Register GET/POST/DELETE handlers for /<key> on server, backed by store.
  * Each request logs one line "<method> <path> <status>" to log, which must outlive server.
  */
 void kv_register_routes(http_server *server, kv_store *store, logger *log);

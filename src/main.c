@@ -11,15 +11,6 @@
 #include "kv/kv_handlers.h"
 #include "kv/kv_store.h"
 #include "log/async_log.h"
-#include "json/json.h"
-
-/** Respond to the ping route with HTTP 200 and a plain-text pong body. */
-static void ping(http_response *w, const http_request *r, void *arg) {
-  (void)r;
-  (void)arg;
-  http_set_header(w, HTTP_STR("content-type"), HTTP_STR("text/plain"));
-  http_write(w, 200, "pong\n", 5);
-}
 
 static sem_t server_stopping;
 
@@ -43,7 +34,7 @@ static void *wait_for_signal(void *arg) {
   _exit(1);
 }
 
-/** Serve the ping and KV endpoints as configured by KV_* env vars until SIGTERM or SIGINT. */
+/** Serve the KV endpoints as configured by KV_* env vars until SIGTERM or SIGINT. */
 int main(void) {
   kv_config cfg;
   if (config_load(&cfg) != 0) {
@@ -82,7 +73,6 @@ int main(void) {
   }
 
   http_server *server = http_server_new();
-  http_handle(server, HTTP_GET, "/ping", ping, NULL);
   kv_register_routes(server, store, &log);
 
   pthread_t signal_thread;
