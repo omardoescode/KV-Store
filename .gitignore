@@ -75,3 +75,9 @@ kv.log
 
 # Local runtime data (DB, logs)
 in/
+
+# Benchmark results (bench/profile.py)
+results/
+
+# Python
+__pycache__/

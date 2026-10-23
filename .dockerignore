@@ -1,0 +1,17 @@
+**/.git
+.github
+.githooks
+.cache
+.claude
+.scratch
+build
+in
+results
+instructor-provided
+tests
+.env
+*.db
+*.db-wal
+*.db-shm
+*.log
+vgcore.*

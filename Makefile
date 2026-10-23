@@ -42,7 +42,7 @@ DEP := $(OBJ:.o=.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-shutdown memcheck format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-shutdown memcheck bench format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET)
 
@@ -161,6 +161,9 @@ test: $(TEST_BINS) $(TARGET)
 
 memcheck: $(TARGET)
 	tests/memcheck.sh
+
+bench:
+	python3 bench/profile.py $(BENCH_ARGS)
 
 CLANG_FORMAT ?= clang-format
 CLANG_TIDY ?= clang-tidy
