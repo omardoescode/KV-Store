@@ -40,7 +40,7 @@ DEP := $(OBJ:.o=.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean test test-hashmap memcheck format format-check lint lint-fix init
+.PHONY: all clean distclean test test-hashmap test-router memcheck format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET)
 
@@ -106,6 +106,16 @@ $(HM_TEST_BIN): $(HM_TEST_SRC) src/hashmap/hashmap.h $(SIPHASH_OBJ)
 test-hashmap: $(HM_TEST_BIN)
 	./$(HM_TEST_BIN)
 
+ROUTER_TEST_SRC := src/http/router.c tests/http_router_test.c
+ROUTER_TEST_BIN := $(BUILD_DIR)/http_router_test
+
+$(ROUTER_TEST_BIN): $(ROUTER_TEST_SRC) src/http/router.h src/http/http.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(ROUTER_TEST_SRC) -o $@
+
+test-router: $(ROUTER_TEST_BIN)
+	./$(ROUTER_TEST_BIN)
+
 memcheck: $(TARGET)
 	tests/memcheck.sh
 
@@ -135,7 +145,7 @@ init:
 	git config core.hooksPath .githooks
 
 clean:
-	rm -f $(TARGET) $(OBJ) $(DEP) $(YYJSON_OBJ) $(SIPHASH_OBJ) $(HM_TEST_BIN)
+	rm -f $(TARGET) $(OBJ) $(DEP) $(YYJSON_OBJ) $(SIPHASH_OBJ) $(HM_TEST_BIN) $(ROUTER_TEST_BIN)
 
 distclean:
 	rm -rf $(BUILD_DIR)

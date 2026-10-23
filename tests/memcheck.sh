@@ -48,9 +48,17 @@ for _ in 1 2 3; do
   expect 400 -X PUT -d 'not json' "$url/kv/test"
   expect 400 -X PUT "$url/kv/test"
 
-  # Missing key in the path
-  expect 400 "$url/kv"
-  expect 400 "$url/kv/"
+  # Missing key in the path matches no route
+  expect 404 "$url/kv"
+  expect 404 "$url/kv/"
+
+  # Each path segment is percent-decoded after the split
+  expect 200 -X PUT -d '{"value":"slash"}' "$url/kv/a%2Fb"
+  expect 200 "$url/kv/a%2Fb"
+  expect 404 "$url/kv/a/b"
+  expect 200 -X DELETE "$url/kv/a%2fb"
+  expect 400 "$url/kv/a%zz"
+  expect 400 "$url/kv/a%4"
 done
 
 # The server has no shutdown path; valgrind reports at SIGTERM.

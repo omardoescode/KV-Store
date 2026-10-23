@@ -12,19 +12,18 @@
 #include <unistd.h>
 
 #include "h2o.h"
-
-typedef struct {
-  h2o_iovec_t path;
-  http_method method;
-  http_handler fn;
-  void *arg;
-} route;
+#include "http/router.h"
 
 struct http_server {
   h2o_globalconf_t config;
-  // Sorted by path length, longest first, so that the first match is the most specific.
-  route *routes;
-  size_t route_count;
+  router routes;
+};
+
+struct http_request {
+  h2o_req_t *req;
+  const route *rt;
+  // The decoded path segment that matched each route segment.
+  const http_str *values;
 };
 
 typedef struct {
@@ -67,32 +66,34 @@ static int method_of(h2o_iovec_t name) {
   return -1;
 }
 
-/** Return 1 if path is the route path or is below it. */
-static int path_matches(const route *rt, h2o_iovec_t path) {
-  return path.len >= rt->path.len && memcmp(path.base, rt->path.base, rt->path.len) == 0 &&
-         (rt->path.base[rt->path.len - 1] == '/' || path.len == rt->path.len ||
-          path.base[rt->path.len] == '/');
-}
-
-/** Dispatch to the most specific route that matches path and method; return -1 if none. */
+/** Dispatch to the first route that matches path and method; return -1 if none. */
 static int on_req(h2o_handler_t *self, h2o_req_t *req) {
   const http_server *s = ((dispatcher *)self)->server;
-  int method = method_of(req->method);
-  for (size_t i = 0; i != s->route_count; i++) {
-    const route *rt = &s->routes[i];
-    if ((int)rt->method == method && path_matches(rt, req->path_normalized)) {
-      rt->fn((http_response *)req, (const http_request *)req, rt->arg);
-      return 0;
-    }
+  http_str path = {req->path.base, req->query_at != SIZE_MAX ? req->query_at : req->path.len};
+  char *buf = memchr(path.ptr, '%', path.len) != NULL
+                  ? h2o_mem_alloc_pool(&req->pool, char, path.len)
+                  : NULL;
+  http_str values[ROUTER_MAX_SEGMENTS];
+  size_t count = 0;
+  router_status status = router_split(&s->routes, path, buf, values, &count);
+  if (status == ROUTER_BAD_REQUEST) {
+    h2o_send_error_400(req, "Bad Request", "invalid path", 0);
+    return 0;
   }
-  return -1;
+  const route *rt =
+      status == ROUTER_OK ? router_match(&s->routes, method_of(req->method), values, count) : NULL;
+  if (rt == NULL) {
+    return -1;
+  }
+  struct http_request r = {req, rt, values};
+  rt->fn((http_response *)req, &r, rt->arg);
+  return 0;
 }
 
 /** Allocate and initialize a server with a default host and no Server response header. */
 http_server *http_server_new(void) {
   http_server *s = h2o_mem_alloc(sizeof(*s));
-  s->routes = NULL;
-  s->route_count = 0;
+  s->routes = (router){NULL, 0, 0};
   h2o_config_init(&s->config);
   // No "Server" header: H2O formats it with sprintf on each response.
   s->config.server_name = (h2o_iovec_t){NULL, 0};
@@ -108,20 +109,19 @@ http_server *http_server_new(void) {
   return s;
 }
 
-/**
- * Register a method handler on a path, keeping routes sorted from longest path to shortest.
- * Call before serving; the path also matches descendants and arg is passed to the handler.
- */
+/** Free the routes and the H2O configuration of a server that no event loop runs. */
+void http_server_free(http_server *s) {
+  router_free(&s->routes);
+  h2o_config_dispose(&s->config);
+  free(s);
+}
+
+/** Register a method handler on a path pattern; abort with a message if it is malformed. */
 void http_handle(http_server *s, http_method method, const char *path, http_handler handler,
                  void *arg) {
-  route rt = {h2o_strdup(NULL, path, SIZE_MAX), method, handler, arg};
-  s->routes = h2o_mem_realloc(s->routes, sizeof(*s->routes) * (s->route_count + 1));
-
-  size_t i = s->route_count++;
-  for (; i != 0 && s->routes[i - 1].path.len < rt.path.len; i--) {
-    s->routes[i] = s->routes[i - 1];
+  if (router_add(&s->routes, method, path, handler, arg) != 0) {
+    h2o_fatal("http_handle: invalid route pattern \"%s\"", path);
   }
-  s->routes[i] = rt;
 }
 
 /** Drain pending connections into the worker context, ignoring listener error callbacks. */
@@ -326,19 +326,33 @@ int http_listen_and_serve(http_server *s, const char *addr, int threads) {
 
 /** Return a borrowed method string, valid only until the request handler returns. */
 http_str http_req_method(const http_request *r) {
-  const h2o_req_t *req = (const h2o_req_t *)r;
+  const h2o_req_t *req = r->req;
   return (http_str){req->method.base, req->method.len};
 }
 
 /** Return the borrowed normalized path, valid only until the request handler returns. */
 http_str http_req_path(const http_request *r) {
-  const h2o_req_t *req = (const h2o_req_t *)r;
+  const h2o_req_t *req = r->req;
   return (http_str){req->path_normalized.base, req->path_normalized.len};
+}
+
+/**
+ * Return the path segment that matched the "{name}" route segment, or {NULL, 0} if the route
+ * has no such parameter. The value is borrowed and valid only until the handler returns.
+ */
+http_str http_req_param(const http_request *r, http_str name) {
+  for (size_t i = 0; i != r->rt->segment_count; i++) {
+    const route_segment *seg = &r->rt->segments[i];
+    if (seg->is_param && h2o_memis(seg->text.ptr, seg->text.len, name.ptr, name.len)) {
+      return r->values[i];
+    }
+  }
+  return (http_str){NULL, 0};
 }
 
 /** Return the borrowed request body, valid only until the request handler returns. */
 http_str http_req_body(const http_request *r) {
-  const h2o_req_t *req = (const h2o_req_t *)r;
+  const h2o_req_t *req = r->req;
   return (http_str){req->entity.base, req->entity.len};
 }
 
@@ -347,7 +361,7 @@ http_str http_req_body(const http_request *r) {
  * The returned value is borrowed and valid only until the request handler returns.
  */
 http_str http_req_header(const http_request *r, http_str name) {
-  const h2o_req_t *req = (const h2o_req_t *)r;
+  const h2o_req_t *req = r->req;
   ssize_t i = h2o_find_header_by_str(&req->headers, name.ptr, name.len, -1);
   if (i == -1) {
     return (http_str){NULL, 0};

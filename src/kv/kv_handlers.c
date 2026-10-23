@@ -43,22 +43,15 @@ static void reply(http_response *response, const char *op, http_str key, int sta
 }
 
 /**
- * Set *key to the part of the path after "/kv/".
+ * Set *key to the "{key}" path parameter.
  * Return 0 or -1 if there is no key.
  */
 static int key_from_path(const http_request *request, http_str *key) {
-  static const char prefix[] = "/kv/";
-  const size_t n = sizeof(prefix) - 1;
-  http_str path = http_req_path(request);
-  // Reject the request if the path is "/kv" or "/kv/" with nothing after it,
-  // or if the path doesn't start with "/kv/".
-  if (path.len <= n || memcmp(path.ptr, prefix, n) != 0) {
+  http_str param = http_req_param(request, HTTP_STR("key"));
+  if (!param.ptr) {
     return -1;
   }
-
-  // Points the key at the bytes right after the "/kv/" prefix.
-  key->ptr = path.ptr + n;
-  key->len = path.len - n;
+  *key = param;
   return 0;
 }
 
@@ -213,7 +206,7 @@ static void kv_del_handler(http_response *response, const http_request *request,
 
 void kv_register_routes(http_server *server, kv_store *store, FILE *log) {
   log_file = log;
-  http_handle(server, HTTP_GET, "/kv", kv_get_handler, store);
-  http_handle(server, HTTP_PUT, "/kv", kv_put_handler, store);
-  http_handle(server, HTTP_DELETE, "/kv", kv_del_handler, store);
+  http_handle(server, HTTP_GET, "/kv/{key}", kv_get_handler, store);
+  http_handle(server, HTTP_PUT, "/kv/{key}", kv_put_handler, store);
+  http_handle(server, HTTP_DELETE, "/kv/{key}", kv_del_handler, store);
 }

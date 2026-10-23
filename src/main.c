@@ -30,6 +30,7 @@ int main(void) {
   kv_store *store = kv_store_new("kv_snapshot_persistence.txt");
   if (!store) {
     (void)fprintf(stderr, "Failed to create kv_store.\n");
+    (void)fclose(log);
     return 1;
   }
   kv_register_routes(server, store, log);
@@ -42,6 +43,7 @@ int main(void) {
   }
 
   kv_store_free(store);
+  http_server_free(server);
   (void)fclose(log);
   return 1;
 }

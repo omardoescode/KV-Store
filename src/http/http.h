@@ -23,10 +23,19 @@ typedef void (*http_handler)(http_response *w, const http_request *r, void *arg)
 /** Allocate and initialize a server; register routes before starting it. */
 http_server *http_server_new(void);
 
+/** Free a server and its routes; call only when no event loop of it runs. */
+void http_server_free(http_server *s);
+
 /**
- * Register handler for method on path and its descendants, passing arg to each call.
- * path must start with '/'. The longest matching path that has a handler for the request
- * method gets the request. All calls must come before http_listen_and_serve.
+ * Register handler for method on path, passing arg to each call. path must start with '/'.
+ * A "{name}" segment matches one non-empty path segment; read it with http_req_param.
+ * Names must be non-empty and unique in path; literal segments must not contain braces.
+ * At most 32 segments. A malformed path aborts the process with a message.
+ * The request path is split on '/', then each segment is percent-decoded and compared;
+ * an invalid escape or a "." or ".." segment gets 400.
+ * Paths match exactly: "/" matches only "/", and "/a/" does not match "/a" or "/{name}".
+ * At the first position where two routes differ, a static segment wins over "{name}".
+ * All calls must come before http_listen_and_serve.
  */
 void http_handle(http_server *s, http_method method, const char *path, http_handler handler,
                  void *arg);
@@ -47,6 +56,11 @@ int http_listen_and_serve(http_server *s, const char *addr, int threads);
 http_str http_req_method(const http_request *r);
 /** Return the borrowed request normalized path, valid until the handler returns. */
 http_str http_req_path(const http_request *r);
+/**
+ * Return the path segment that matched the "{name}" route segment, or {NULL, 0} if absent.
+ * The value is percent-decoded, borrowed, and valid until the handler returns.
+ */
+http_str http_req_param(const http_request *r, http_str name);
 /** Return the borrowed request body, valid until the handler returns. */
 http_str http_req_body(const http_request *r);
 /**
