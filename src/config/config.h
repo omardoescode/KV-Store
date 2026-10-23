@@ -6,7 +6,6 @@ typedef struct {
   const char *listen_addr;
   const char *log_path;
   const char *db_path;
-  const char *snapshot_path;
   int flush_interval_ms;
   /** 0 means one event loop per usable CPU. */
   int threads;

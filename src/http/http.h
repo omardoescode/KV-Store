@@ -82,9 +82,16 @@ int http_default_threads(void);
 
 /**
  * Serve addr ("host:port") with threads event loops, one on the calling thread.
- * Requires threads >= 1; returns -1 on failure or if the calling event loop stops.
+ * Requires threads >= 1. Returns 0 after http_server_stop, when every loop has stopped;
+ * returns -1 on setup failure or if an event loop fails. Joins all its threads before it returns.
  */
 int http_listen_and_serve(http_server *s, const char *addr, int threads);
+
+/**
+ * Make http_listen_and_serve stop accepting connections, wait up to 5 s for open requests to
+ * finish, and return 0. Async-signal-safe; any thread, also before the server starts.
+ */
+void http_server_stop(http_server *s);
 
 /** Return the borrowed request method, valid until the handler returns. */
 http_str http_req_method(const http_request *r);

@@ -45,9 +45,6 @@ int config_load(kv_config *cfg) {
     return -1;
   }
 
-  const char *snapshot = getenv("KV_SNAPSHOT_PATH");
-  cfg->snapshot_path = snapshot && *snapshot ? snapshot : "kv_snapshot_persistence.txt";
-
   long flush_ms = 100;
   long threads = 0;
   if (env_long("KV_FLUSH_INTERVAL_MS", &flush_ms) != 0 || env_long("KV_THREADS", &threads) != 0) {

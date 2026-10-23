@@ -24,6 +24,8 @@ SIPHASH_DIR := third_party/siphash
 SIPHASH_OBJ := $(BUILD_DIR)/siphash.o
 SIPHASH_CPPFLAGS := -isystem $(SIPHASH_DIR)
 
+SQLITE_LIBS := $(shell pkg-config --libs sqlite3 2>/dev/null || echo -lsqlite3)
+
 CPPFLAGS := -Isrc
 
 H2O_CPPFLAGS := -isystem $(H2O_DIR)/include $(H2O_DEPS:%=-isystem $(H2O_DIR)/deps/%) \
@@ -32,7 +34,7 @@ H2O_CPPFLAGS := -isystem $(H2O_DIR)/include $(H2O_DEPS:%=-isystem $(H2O_DIR)/dep
 
 LDLIBS := $(YYJSON_OBJ) $(SIPHASH_OBJ) $(H2O_LIB) \
           $(shell pkg-config --libs openssl zlib 2>/dev/null || echo -lssl -lcrypto -lz) \
-          -lm
+          $(SQLITE_LIBS) -lm
 
 SRC := $(wildcard src/*.c src/*/*.c)
 OBJ := $(SRC:src/%.c=$(BUILD_DIR)/%.o)
@@ -40,7 +42,7 @@ DEP := $(OBJ:.o=.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean run test test-hashmap test-router test-log test-config memcheck format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-shutdown memcheck format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET)
 
@@ -138,10 +140,24 @@ $(CONFIG_TEST_BIN): $(CONFIG_TEST_SRC) src/config/config.h
 test-config: $(CONFIG_TEST_BIN)
 	./$(CONFIG_TEST_BIN)
 
-TEST_BINS := $(HM_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN)
+KV_STORE_TEST_SRC := src/kv/kv_store.c src/hashmap/hashmap.c tests/kv_store_test.c
+KV_STORE_TEST_BIN := $(BUILD_DIR)/kv_store_test
 
-test: $(TEST_BINS)
+$(KV_STORE_TEST_BIN): $(KV_STORE_TEST_SRC) src/kv/kv_store.h src/hashmap/hashmap.h src/log/log.h $(SIPHASH_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS) $(KV_STORE_TEST_SRC) $(SIPHASH_OBJ) $(SQLITE_LIBS) -o $@
+
+test-kv-store: $(KV_STORE_TEST_BIN)
+	./$(KV_STORE_TEST_BIN)
+
+TEST_BINS := $(HM_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
+
+test-shutdown: $(TARGET)
+	tests/shutdown_test.sh
+
+test: $(TEST_BINS) $(TARGET)
 	@set -e; for t in $(TEST_BINS); do ./$$t; done
+	tests/shutdown_test.sh
 
 memcheck: $(TARGET)
 	tests/memcheck.sh
@@ -170,7 +186,8 @@ init:
 	@command -v pkg-config >/dev/null || { echo "init: pkg-config not installed" >&2; exit 1; }
 	@command -v valgrind >/dev/null || { echo "init: valgrind not installed" >&2; exit 1; }
 	@command -v curl >/dev/null || { echo "init: curl not installed" >&2; exit 1; }
-	@pkg-config --exists openssl zlib || { echo "init: openssl or zlib dev files not installed" >&2; exit 1; }
+	@command -v sqlite3 >/dev/null || { echo "init: sqlite3 CLI not installed" >&2; exit 1; }
+	@pkg-config --exists openssl zlib sqlite3 || { echo "init: openssl, zlib or sqlite3 dev files not installed" >&2; exit 1; }
 	git submodule update --init --depth 1
 	git config core.hooksPath .githooks
 

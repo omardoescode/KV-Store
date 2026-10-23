@@ -114,6 +114,7 @@ static size_t drain(async_log *l, second_cache *cache) {
 /** Drain the rings until stopped, flushing out and sleeping whenever they are empty. */
 static void *writer_main(void *arg) {
   async_log *l = arg;
+  pthread_setname_np(pthread_self(), "kv-log");
   second_cache cache = {-1, ""};
   const struct timespec idle = {0, 5000000L};
   int pending = 0;

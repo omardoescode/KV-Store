@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runs the server under valgrind, sends requests, and fails on a wrong status code,
-# a memory error, or a definite leak.
+# a memory error, a definite leak, or an unclean SIGTERM shutdown.
 set -eu
 
 export KV_LISTEN_ADDR="${KV_LISTEN_ADDR:-127.0.0.1:7890}"
@@ -64,9 +64,10 @@ for _ in 1 2 3; do
   expect 400 "$url/kv/a%4"
 done
 
-# The server has no shutdown path; valgrind reports at SIGTERM.
 kill -TERM "$pid"
-wait "$pid" || true
+status=0
+wait "$pid" || status=$?
+[ "$status" = 0 ] || { echo "memcheck: exit status $status after SIGTERM, want 0" >&2; cat "$log" >&2; exit 1; }
 
 grep -q 'ERROR SUMMARY: 0 errors' "$log" || { cat "$log" >&2; exit 1; }
 echo "memcheck: OK"

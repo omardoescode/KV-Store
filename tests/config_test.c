@@ -6,8 +6,7 @@
 #include <string.h>
 
 static const char *const VARS[] = {
-    "KV_LISTEN_ADDR",   "KV_LOG_PATH", "KV_DB_PATH",
-    "KV_SNAPSHOT_PATH", "KV_THREADS",  "KV_FLUSH_INTERVAL_MS",
+    "KV_LISTEN_ADDR", "KV_LOG_PATH", "KV_DB_PATH", "KV_THREADS", "KV_FLUSH_INTERVAL_MS",
 };
 
 static void set_required(void) {
@@ -26,7 +25,6 @@ static void test_required_set_uses_optional_defaults(void) {
   assert(strcmp(cfg.listen_addr, "127.0.0.1:7890") == 0);
   assert(strcmp(cfg.log_path, "kv.log") == 0);
   assert(strcmp(cfg.db_path, "kv.db") == 0);
-  assert(strcmp(cfg.snapshot_path, "kv_snapshot_persistence.txt") == 0);
   assert(cfg.flush_interval_ms == 100);
   assert(cfg.threads == 0);
   printf("  test_required_set_uses_optional_defaults OK\n");
@@ -37,7 +35,6 @@ static void test_overrides(void) {
   setenv("KV_LISTEN_ADDR", "0.0.0.0:8080", 1);
   setenv("KV_LOG_PATH", "/tmp/a.log", 1);
   setenv("KV_DB_PATH", "/tmp/a.db", 1);
-  setenv("KV_SNAPSHOT_PATH", "/tmp/a.txt", 1);
   setenv("KV_FLUSH_INTERVAL_MS", "250", 1);
   setenv("KV_THREADS", "4", 1);
   kv_config cfg;
@@ -45,7 +42,6 @@ static void test_overrides(void) {
   assert(strcmp(cfg.listen_addr, "0.0.0.0:8080") == 0);
   assert(strcmp(cfg.log_path, "/tmp/a.log") == 0);
   assert(strcmp(cfg.db_path, "/tmp/a.db") == 0);
-  assert(strcmp(cfg.snapshot_path, "/tmp/a.txt") == 0);
   assert(cfg.flush_interval_ms == 250);
   assert(cfg.threads == 4);
   printf("  test_overrides OK\n");
@@ -53,12 +49,10 @@ static void test_overrides(void) {
 
 static void test_empty_optional_uses_default(void) {
   set_required();
-  setenv("KV_SNAPSHOT_PATH", "", 1);
   setenv("KV_THREADS", "", 1);
   setenv("KV_FLUSH_INTERVAL_MS", "", 1);
   kv_config cfg;
   assert(config_load(&cfg) == 0);
-  assert(strcmp(cfg.snapshot_path, "kv_snapshot_persistence.txt") == 0);
   assert(cfg.threads == 0);
   assert(cfg.flush_interval_ms == 100);
   printf("  test_empty_optional_uses_default OK\n");

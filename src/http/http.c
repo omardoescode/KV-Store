@@ -1,6 +1,7 @@
 #include "http/http.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <pthread.h>
 #include <sched.h>
@@ -44,6 +45,9 @@ struct http_server {
   middleware_list middleware;
   http_group *groups;
   binding *bindings;
+  // http_server_stop writes to stop_pipe[1]; each event loop polls its own dup of stop_pipe[0],
+  // which stays readable once written, so a stop before the loops start is not lost.
+  int stop_pipe[2];
 };
 
 // The rest of the middleware chain of one request: server middleware, then group middleware.
@@ -67,6 +71,8 @@ typedef struct {
 
 enum { GATE_WAIT, GATE_RUN, GATE_ABORT };
 
+enum { HTTP_SHUTDOWN_GRACE_MS = 5000 };
+
 // Holds new threads until all of them exist, so that a failed start can stop them.
 typedef struct {
   pthread_mutex_t mu;
@@ -80,6 +86,8 @@ typedef struct {
   pthread_t tid;
   start_gate *gate;
   h2o_socket_t *listener;
+  h2o_socket_t *stop;
+  int stopping;
   h2o_context_t ctx;
   h2o_accept_ctx_t accept_ctx;
 } worker;
@@ -148,6 +156,9 @@ http_server *http_server_new(void) {
   s->middleware = (middleware_list){NULL, 0};
   s->groups = NULL;
   s->bindings = NULL;
+  if (pipe2(s->stop_pipe, O_CLOEXEC | O_NONBLOCK) != 0) {
+    h2o_fatal("pipe2: %s", strerror(errno));
+  }
   h2o_config_init(&s->config);
   // No "Server" header: H2O formats it with sprintf on each response.
   s->config.server_name = (h2o_iovec_t){NULL, 0};
@@ -180,7 +191,15 @@ void http_server_free(http_server *s) {
   }
   free(s->middleware.items);
   h2o_config_dispose(&s->config);
+  close(s->stop_pipe[0]);
+  close(s->stop_pipe[1]);
   free(s);
+}
+
+void http_server_stop(http_server *s) {
+  int saved = errno;
+  (void)!write(s->stop_pipe[1], "", 1);
+  errno = saved;
 }
 
 /** Register handler with a binding to group; abort with a message if path is malformed. */
@@ -271,21 +290,77 @@ static int listen_on(const struct addrinfo *ai) {
   return fd;
 }
 
-/** Initialize a worker context and accept loop; return NULL if the event loop stops. */
+/** Stop accepting and ask open connections to close once their requests finish. */
+static void on_stop(h2o_socket_t *stop, const char *err) {
+  (void)err;
+  worker *w = stop->data;
+  h2o_socket_close(stop);
+  w->stop = NULL;
+  h2o_socket_read_stop(w->listener);
+  h2o_socket_close(w->listener);
+  w->listener = NULL;
+  h2o_context_request_shutdown(&w->ctx);
+  w->stopping = 1;
+}
+
+static size_t open_conns(const h2o_context_t *ctx) {
+  return ctx->_conns.num_conns.idle + ctx->_conns.num_conns.active + ctx->_conns.num_conns.shutdown;
+}
+
+/**
+ * Initialize a worker context and accept loop, run it until http_server_stop and its connections
+ * close or a loop fails, then free the context. Return w if stopped, NULL on failure.
+ */
 static void *run_worker(void *arg) {
   worker *w = arg;
-  h2o_context_init(&w->ctx, h2o_evloop_create(), &w->server->config);
+  pthread_setname_np(pthread_self(), "kv-loop");
+  int stop_fd = fcntl(w->server->stop_pipe[0], F_DUPFD_CLOEXEC, 0);
+  if (stop_fd == -1) {
+    close(w->fd);
+    http_server_stop(w->server);
+    return NULL;
+  }
+  h2o_evloop_t *loop = h2o_evloop_create();
+  h2o_context_init(&w->ctx, loop, &w->server->config);
   w->accept_ctx.ctx = &w->ctx;
   w->accept_ctx.hosts = w->server->config.hosts;
 
-  w->listener = h2o_evloop_socket_create(w->ctx.loop, w->fd, H2O_SOCKET_FLAG_DONT_READ);
+  w->listener = h2o_evloop_socket_create(loop, w->fd, H2O_SOCKET_FLAG_DONT_READ);
   w->listener->data = w;
   h2o_socket_read_start(w->listener, on_accept);
+  w->stop = h2o_evloop_socket_create(loop, stop_fd, H2O_SOCKET_FLAG_DONT_READ);
+  w->stop->data = w;
+  h2o_socket_read_start(w->stop, on_stop);
 
-  // A signal can interrupt the wait; that is not a reason to stop the loop.
-  while (h2o_evloop_run(w->ctx.loop, INT32_MAX) == 0 || errno == EINTR) {
+  int failed = 0;
+  uint64_t deadline = 0;
+  while (!w->stopping || (open_conns(&w->ctx) != 0 && h2o_now(loop) < deadline)) {
+    // A signal can interrupt the wait; that is not a reason to stop the loop.
+    if (h2o_evloop_run(loop, w->stopping ? 100 : INT32_MAX) != 0 && errno != EINTR) {
+      failed = 1;
+      break;
+    }
+    if (w->stopping && deadline == 0) {
+      deadline = h2o_now(loop) + HTTP_SHUTDOWN_GRACE_MS;
+    }
   }
-  return NULL;
+  if (failed) {
+    http_server_stop(w->server);
+  }
+  if (w->stop != NULL) {
+    h2o_socket_close(w->stop);
+  }
+  if (w->listener != NULL) {
+    h2o_socket_close(w->listener);
+  }
+  // A connection still open after the grace period keeps the loop: disposing would free under it.
+  if (open_conns(&w->ctx) == 0) {
+    h2o_context_dispose(&w->ctx);
+    h2o_evloop_destroy(loop);
+    // Free the thread-local recycled buffers and pools of H2O; now 0 asks for a full clear.
+    h2o_cleanup_thread(0, NULL);
+  }
+  return failed ? NULL : w;
 }
 
 /** Wait at the start gate, then run the worker, or return NULL if the start was aborted. */
@@ -375,8 +450,9 @@ int http_default_threads(void) {
 
 /**
  * Bind host:port and serve with threads event loops, including the calling thread.
- * Requires threads >= 1; returns -1 on setup failure or if the calling event loop stops.
- * On failure, all threads and listeners of this call are stopped and closed.
+ * Requires threads >= 1. Returns 0 after http_server_stop once every loop has stopped, or -1
+ * on setup failure or if an event loop fails. All threads and listeners of this call are
+ * stopped and closed before it returns.
  */
 int http_listen_and_serve(http_server *s, const char *addr, int threads) {
   const char *colon = strrchr(addr, ':');
@@ -437,8 +513,16 @@ int http_listen_and_serve(http_server *s, const char *addr, int threads) {
 
   (void)signal(SIGPIPE, SIG_IGN);
   open_gate(&gate, GATE_RUN);
-  run_worker(&workers[0]);
-  return -1;
+  int status = run_worker(&workers[0]) != NULL ? 0 : -1;
+  for (int i = 1; i != threads; i++) {
+    void *ret = NULL;
+    pthread_join(workers[i].tid, &ret);
+    if (ret == NULL) {
+      status = -1;
+    }
+  }
+  free(workers);
+  return status;
 }
 
 /** Return a borrowed method string, valid only until the request handler returns. */

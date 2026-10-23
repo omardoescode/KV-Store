@@ -23,7 +23,7 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc >/dev/null
           echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_VERSION} main" | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y clang-format-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} g++ cmake pkg-config libssl-dev zlib1g-dev valgrind
+          sudo apt-get install -y clang-format-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} g++ cmake pkg-config libssl-dev zlib1g-dev libsqlite3-dev sqlite3 valgrind
 
       - name: Format check
         run: make format-check
