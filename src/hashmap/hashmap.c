@@ -55,7 +55,7 @@ static hm_entry *hm_find(const hashmap *m, const char *key, size_t key_len, uint
 // Assumes the write lock is held. Doubles the bucket array and rehashes.
 static int hm_resize_locked(hashmap *m) {
   size_t new_count = m->bucket_count * 2U;
-  hm_entry **new_buckets = calloc(new_count, sizeof(*new_buckets));
+  hm_entry **new_buckets = (hm_entry **)calloc(new_count, sizeof(hm_entry *));
   if (!new_buckets) {
     return -1;
   }
@@ -69,7 +69,7 @@ static int hm_resize_locked(hashmap *m) {
       e = next;
     }
   }
-  free(m->buckets);
+  free((void *)m->buckets);
   m->buckets = new_buckets;
   m->bucket_count = new_count;
   return 0;
@@ -80,7 +80,7 @@ hashmap *hashmap_new(void) {
   if (!m) {
     return NULL;
   }
-  m->buckets = calloc(HM_INITIAL_BUCKETS, sizeof(*m->buckets));
+  m->buckets = (hm_entry **)calloc(HM_INITIAL_BUCKETS, sizeof(hm_entry *));
   if (!m->buckets) {
     free(m);
     return NULL;
@@ -88,7 +88,7 @@ hashmap *hashmap_new(void) {
   m->bucket_count = HM_INITIAL_BUCKETS;
   m->count = 0;
   if (pthread_rwlock_init(&m->lock, NULL) != 0) {
-    free(m->buckets);
+    free((void *)m->buckets);
     free(m);
     return NULL;
   }
@@ -109,7 +109,7 @@ void hashmap_free(hashmap *m) {
       e = next;
     }
   }
-  free(m->buckets);
+  free((void *)m->buckets);
   pthread_rwlock_destroy(&m->lock);
   free(m);
 }
