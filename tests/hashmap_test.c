@@ -180,6 +180,55 @@ static void test_resize_many_inserts(void) {
   printf("  test_resize_many_inserts OK\n");
 }
 
+// Keys of every length from 1 to 64 bytes cross every SipHash block and tail size, and two maps
+// get separate random hash keys.
+static void test_many_keys_two_maps(void) {
+  hashmap *a = hashmap_new();
+  hashmap *b = hashmap_new();
+  assert(a && b);
+
+  enum { N = 5000, MAX_KEY_LEN = 64 };
+  char key[MAX_KEY_LEN + 1];
+  char val[32];
+
+  for (int i = 0; i < N; i++) {
+    int klen = 1 + i % MAX_KEY_LEN;
+    int prefix = snprintf(key, sizeof(key), "%d-", i);
+    assert(prefix > 0);
+    memset(key + prefix, 'x', sizeof(key) - (size_t)prefix);
+    key[klen > prefix ? klen : prefix] = '\0';
+    int vlen = snprintf(val, sizeof(val), "v%d", i);
+    assert(vlen > 0);
+    assert(hashmap_put(a, key, val, (size_t)vlen) == 0);
+    assert(hashmap_put(b, key, val, (size_t)vlen) == 0);
+  }
+  assert(hashmap_len(a) == (size_t)N);
+  assert(hashmap_len(b) == (size_t)N);
+
+  for (int i = 0; i < N; i++) {
+    int klen = 1 + i % MAX_KEY_LEN;
+    int prefix = snprintf(key, sizeof(key), "%d-", i);
+    assert(prefix > 0);
+    memset(key + prefix, 'x', sizeof(key) - (size_t)prefix);
+    key[klen > prefix ? klen : prefix] = '\0';
+    int vlen = snprintf(val, sizeof(val), "v%d", i);
+    assert(vlen > 0);
+    hashmap *maps[] = {a, b};
+    for (size_t j = 0; j < 2; j++) {
+      void *out = NULL;
+      size_t out_len = 0;
+      assert(hashmap_get(maps[j], key, &out, &out_len) == 1);
+      assert(out_len == (size_t)vlen);
+      assert(memcmp(out, val, (size_t)vlen) == 0);
+      free(out);
+    }
+  }
+
+  hashmap_free(a);
+  hashmap_free(b);
+  printf("  test_many_keys_two_maps OK\n");
+}
+
 enum { NUM_WRITERS = 4, NUM_READERS = 4, OPS_PER_WRITER = 25000 };
 
 typedef struct {
@@ -302,6 +351,7 @@ int main(void) {
   test_binary_values();
   test_empty_key_and_empty_value();
   test_resize_many_inserts();
+  test_many_keys_two_maps();
   test_concurrent();
   printf("[hashmap_test] PASS\n");
   return 0;

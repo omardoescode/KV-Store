@@ -7,9 +7,8 @@
 // Keys and values are copied in on put; the map owns its storage until free. Values returned by
 // get are freshly allocated copies that the caller must free.
 //
-// Note: functionV-1a has no seed, so this map is not DoS-hardened against adversarial key
-// collisions over the network. A sip-hash swap is a reasonable future upgrade before exposing user
-// input.
+// Keys are hashed with SipHash-1-3 under a random 128-bit key drawn per map, so network clients
+// cannot precompute colliding keys to degrade buckets into long chains.
 typedef struct hashmap hashmap;
 
 /**

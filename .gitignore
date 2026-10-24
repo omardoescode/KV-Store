@@ -65,3 +65,19 @@ vgcore.*
 
 # Assignment PDF (keep locally, do not track)
 Assignment1.pdf
+
+# Runtime data
+kv.log
+*.db
+*.db-wal
+*.db-shm
+.env
+
+# Local runtime data (DB, logs)
+in/
+
+# Benchmark results (bench/profile.py)
+results/
+
+# Python
+__pycache__/

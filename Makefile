@@ -20,15 +20,21 @@ YYJSON_DIR := third_party/yyjson
 YYJSON_OBJ := $(BUILD_DIR)/yyjson.o
 YYJSON_CPPFLAGS := -isystem $(YYJSON_DIR)/src
 
+SIPHASH_DIR := third_party/siphash
+SIPHASH_OBJ := $(BUILD_DIR)/siphash.o
+SIPHASH_CPPFLAGS := -isystem $(SIPHASH_DIR)
+
+SQLITE_LIBS := $(shell pkg-config --libs sqlite3 2>/dev/null || echo -lsqlite3)
+
 CPPFLAGS := -Isrc
 
 H2O_CPPFLAGS := -isystem $(H2O_DIR)/include $(H2O_DEPS:%=-isystem $(H2O_DIR)/deps/%) \
                 -DH2O_USE_LIBUV=0 -D_GNU_SOURCE \
                 $(shell pkg-config --cflags openssl zlib 2>/dev/null)
 
-LDLIBS := $(YYJSON_OBJ) $(H2O_LIB) \
+LDLIBS := $(YYJSON_OBJ) $(SIPHASH_OBJ) $(H2O_LIB) \
           $(shell pkg-config --libs openssl zlib 2>/dev/null || echo -lssl -lcrypto -lz) \
-          -lm -pthread
+          $(SQLITE_LIBS) -lm
 
 SRC := $(wildcard src/*.c src/*/*.c)
 OBJ := $(SRC:src/%.c=$(BUILD_DIR)/%.o)
@@ -36,7 +42,7 @@ DEP := $(OBJ:.o=.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean test test-hashmap memcheck format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-shutdown memcheck bench format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET)
 
@@ -46,13 +52,14 @@ $(COMPDB): Makefile $(SRC)
 		case $$f in \
 			src/http/*) lib='$(H2O_CPPFLAGS)';; \
 			src/json/*) lib='$(YYJSON_CPPFLAGS)';; \
+			src/hashmap/*) lib='$(SIPHASH_CPPFLAGS)';; \
 			*) lib='';; \
 		esac; \
 		printf '%s\n{"directory":"%s","file":"%s","command":"$(CC) $(CPPFLAGS) %s $(CFLAGS) -c %s"}' \
 			"$$sep" "$(CURDIR)" "$$f" "$$lib" "$$f"; sep=','; \
 	done; echo; echo ']'; } > $@
 
-$(TARGET): $(OBJ) $(YYJSON_OBJ) $(H2O_LIB)
+$(TARGET): $(OBJ) $(YYJSON_OBJ) $(SIPHASH_OBJ) $(H2O_LIB)
 	$(CC) $(CFLAGS) $(OBJ) $(LDLIBS) -o $@
 
 $(H2O_DIR)/CMakeLists.txt:
@@ -65,6 +72,13 @@ $(YYJSON_OBJ): $(YYJSON_DIR)/src/yyjson.c
 	@mkdir -p $(dir $@)
 	$(CC) -std=c17 -O2 -g -flto=auto -c $< -o $@
 
+$(SIPHASH_DIR)/siphash.c:
+	git submodule update --init --depth 1 $(SIPHASH_DIR)
+
+$(SIPHASH_OBJ): $(SIPHASH_DIR)/siphash.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=c17 -O2 -g -flto=auto -DcROUNDS=1 -DdROUNDS=3 -c $< -o $@
+
 $(H2O_LIB): $(H2O_DIR)/CMakeLists.txt
 	cmake -S $(H2O_DIR) -B $(H2O_BUILD) -DCMAKE_BUILD_TYPE=Release \
 		-DWITH_MRUBY=OFF -DWITH_DTRACE=OFF -DWITH_BROTLI=OFF -DWITH_ZSTD=OFF \
@@ -73,56 +87,116 @@ $(H2O_LIB): $(H2O_DIR)/CMakeLists.txt
 
 $(BUILD_DIR)/http/%.o: CPPFLAGS += $(H2O_CPPFLAGS)
 $(BUILD_DIR)/json/%.o: CPPFLAGS += $(YYJSON_CPPFLAGS)
+$(BUILD_DIR)/hashmap/%.o: CPPFLAGS += $(SIPHASH_CPPFLAGS)
 
-$(BUILD_DIR)/%.o: src/%.c | $(H2O_DIR)/CMakeLists.txt $(YYJSON_DIR)/src/yyjson.c
+$(BUILD_DIR)/%.o: src/%.c | $(H2O_DIR)/CMakeLists.txt $(YYJSON_DIR)/src/yyjson.c $(SIPHASH_DIR)/siphash.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
 -include $(DEP)
 
-test: $(TARGET)
-	./$(TARGET)
+run: $(TARGET)
+	@[ -f ./.env ] || { echo "run: ./.env not found; run 'cp .env.example .env'" >&2; exit 1; }
+	@mkdir -p in
+	@set -a; . ./.env; set +a; exec ./$(TARGET)
 
 HM_TEST_SRC := src/hashmap/hashmap.c tests/hashmap_test.c
 HM_TEST_BIN := $(BUILD_DIR)/hashmap_test
 
-$(HM_TEST_BIN): $(HM_TEST_SRC)
+$(HM_TEST_BIN): $(HM_TEST_SRC) src/hashmap/hashmap.h $(SIPHASH_OBJ)
 	@mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $^ -pthread -o $@
+	$(CC) $(CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS) $(HM_TEST_SRC) $(SIPHASH_OBJ) -o $@
 
 test-hashmap: $(HM_TEST_BIN)
 	./$(HM_TEST_BIN)
 
+ROUTER_TEST_SRC := src/http/router.c tests/http_router_test.c
+ROUTER_TEST_BIN := $(BUILD_DIR)/http_router_test
+
+$(ROUTER_TEST_BIN): $(ROUTER_TEST_SRC) src/http/router.h src/http/http.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(ROUTER_TEST_SRC) -o $@
+
+test-router: $(ROUTER_TEST_BIN)
+	./$(ROUTER_TEST_BIN)
+
+LOG_TEST_SRC := src/log/log_ring.c src/log/async_log.c tests/log_test.c
+LOG_TEST_BIN := $(BUILD_DIR)/log_test
+
+$(LOG_TEST_BIN): $(LOG_TEST_SRC) src/log/log.h src/log/log_ring.h src/log/async_log.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LOG_TEST_SRC) -o $@
+
+test-log: $(LOG_TEST_BIN)
+	./$(LOG_TEST_BIN)
+
+CONFIG_TEST_SRC := src/config/config.c tests/config_test.c
+CONFIG_TEST_BIN := $(BUILD_DIR)/config_test
+
+$(CONFIG_TEST_BIN): $(CONFIG_TEST_SRC) src/config/config.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(CONFIG_TEST_SRC) -o $@
+
+test-config: $(CONFIG_TEST_BIN)
+	./$(CONFIG_TEST_BIN)
+
+KV_STORE_TEST_SRC := src/kv/kv_store.c src/hashmap/hashmap.c tests/kv_store_test.c
+KV_STORE_TEST_BIN := $(BUILD_DIR)/kv_store_test
+
+$(KV_STORE_TEST_BIN): $(KV_STORE_TEST_SRC) src/kv/kv_store.h src/hashmap/hashmap.h src/log/log.h $(SIPHASH_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS) $(KV_STORE_TEST_SRC) $(SIPHASH_OBJ) $(SQLITE_LIBS) -o $@
+
+test-kv-store: $(KV_STORE_TEST_BIN)
+	./$(KV_STORE_TEST_BIN)
+
+TEST_BINS := $(HM_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
+
+test-shutdown: $(TARGET)
+	tests/shutdown_test.sh
+
+test: $(TEST_BINS) $(TARGET)
+	@set -e; for t in $(TEST_BINS); do ./$$t; done
+	tests/http_test.sh
+	tests/shutdown_test.sh
+
 memcheck: $(TARGET)
 	tests/memcheck.sh
 
+bench:
+	python3 bench/profile.py $(BENCH_ARGS)
+
+CLANG_FORMAT ?= clang-format
+CLANG_TIDY ?= clang-tidy
+
 format:
-	clang-format -i $(FMT_FILES)
+	$(CLANG_FORMAT) -i $(FMT_FILES)
 
 format-check:
-	clang-format --dry-run --Werror $(FMT_FILES)
+	$(CLANG_FORMAT) --dry-run --Werror $(FMT_FILES)
 
 lint:
-	clang-tidy --quiet $(TIDYFLAGS) $(SRC) -- $(CPPFLAGS) $(H2O_CPPFLAGS) $(YYJSON_CPPFLAGS) $(CFLAGS)
+	$(CLANG_TIDY) --quiet $(TIDYFLAGS) $(SRC) -- $(CPPFLAGS) $(H2O_CPPFLAGS) $(YYJSON_CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS)
 
 lint-fix:
-	clang-tidy --quiet --fix $(TIDYFLAGS) $(SRC) -- $(CPPFLAGS) $(H2O_CPPFLAGS) $(YYJSON_CPPFLAGS) $(CFLAGS)
+	$(CLANG_TIDY) --quiet --fix $(TIDYFLAGS) $(SRC) -- $(CPPFLAGS) $(H2O_CPPFLAGS) $(YYJSON_CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS)
 
 init:
 	@command -v gcc >/dev/null || { echo "init: gcc not installed" >&2; exit 1; }
-	@command -v clang-format >/dev/null || { echo "init: clang-format not installed" >&2; exit 1; }
-	@command -v clang-tidy >/dev/null || { echo "init: clang-tidy not installed" >&2; exit 1; }
+	@command -v $(CLANG_FORMAT) >/dev/null || { echo "init: clang-format not installed" >&2; exit 1; }
+	@command -v $(CLANG_TIDY) >/dev/null || { echo "init: clang-tidy not installed" >&2; exit 1; }
 	@command -v cmake >/dev/null || { echo "init: cmake not installed" >&2; exit 1; }
 	@command -v c++ >/dev/null || { echo "init: C++ compiler not installed (H2O build)" >&2; exit 1; }
 	@command -v pkg-config >/dev/null || { echo "init: pkg-config not installed" >&2; exit 1; }
 	@command -v valgrind >/dev/null || { echo "init: valgrind not installed" >&2; exit 1; }
 	@command -v curl >/dev/null || { echo "init: curl not installed" >&2; exit 1; }
-	@pkg-config --exists openssl zlib || { echo "init: openssl or zlib dev files not installed" >&2; exit 1; }
+	@command -v sqlite3 >/dev/null || { echo "init: sqlite3 CLI not installed" >&2; exit 1; }
+	@pkg-config --exists openssl zlib sqlite3 || { echo "init: openssl, zlib or sqlite3 dev files not installed" >&2; exit 1; }
 	git submodule update --init --depth 1
 	git config core.hooksPath .githooks
 
 clean:
-	rm -f $(TARGET) $(OBJ) $(DEP) $(YYJSON_OBJ) $(HM_TEST_BIN)
+	rm -f $(TARGET) $(OBJ) $(DEP) $(YYJSON_OBJ) $(SIPHASH_OBJ) $(TEST_BINS)
 
 distclean:
 	rm -rf $(BUILD_DIR)
