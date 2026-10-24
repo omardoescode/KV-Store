@@ -5,7 +5,7 @@ A unecessarily elaborate KV Store. Might be better than DynamoDB
 
 Requires `gcc`, a C++ compiler (only for the H2O build), `make`, `clang-format`, `clang-tidy`, `cmake`, `pkg-config`, `valgrind`, `curl`, the `sqlite3` CLI, and the OpenSSL, zlib and SQLite 3 development files.
 
-Persistence: the hashmap in memory serves reads. A writer thread commits each POST/DELETE to the SQLite database at `KV_DB_PATH` (WAL, `synchronous=FULL`) every `KV_FLUSH_INTERVAL_MS`; a failed commit is kept and retried. At start the server loads all rows into memory.
+Persistence: the hashmap in memory serves reads. A writer thread commits each POST/DELETE to the SQLite database at `KV_DB_PATH` (WAL, `synchronous=FULL`) every `KV_FLUSH_INTERVAL_MS`; a failed commit is kept and retried. While `KV_MAX_PENDING` changes (default 1,000,000) wait for the database, POST and DELETE return 503 and do not change the map; GET still works. At start the server loads all rows into memory.
 
 HTTP server: [H2O](https://github.com/h2o/h2o) (`libh2o-evloop`), a git submodule in `third_party/h2o`. `make` builds it with CMake into `build/h2o/`. Supported: Linux, macOS, BSD.
 

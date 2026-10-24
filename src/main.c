@@ -64,7 +64,7 @@ int main(void) {
   }
   logger log = async_log_logger(alog);
 
-  kv_store *store = kv_store_new(cfg.db_path, cfg.flush_interval_ms, log);
+  kv_store *store = kv_store_new(cfg.db_path, cfg.flush_interval_ms, log, (size_t)cfg.max_pending);
   if (!store) {
     (void)fprintf(stderr, "Failed to create kv_store.\n");
     async_log_close(alog);

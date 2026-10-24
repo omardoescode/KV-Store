@@ -39,11 +39,16 @@ struct kv_store {
   change *head;
   change **tail;
   size_t queued;
+  // Changes the writer holds in batch, as of its last lock of mu. Guarded by mu.
+  size_t in_batch;
+  size_t max_pending;
   bool stop;
   // Changes the writer took but did not commit yet, oldest first. Writer thread only.
   change *batch;
   change **batch_tail;
   size_t batch_len;
+  // Changes the writer dropped. Writer thread only until it is joined.
+  size_t dropped;
 };
 
 static change *change_new(const char *key, const void *value, size_t value_len, bool deleted) {
@@ -98,17 +103,15 @@ static int load_rows(kv_store *store) {
   return rc == SQLITE_DONE ? 0 : -1;
 }
 
-/** Return whether rc can clear without a change to the data, as a lock or a full disk can. */
-static bool transient(int rc) {
+/**
+ * Return whether rc comes from the data of one change, so that change fails whatever the database
+ * state. Other errors (a lock, a full disk, a dropped table, corruption) keep the whole batch.
+ */
+static bool poison(int rc) {
   switch (rc) {
-  case SQLITE_BUSY:
-  case SQLITE_LOCKED:
-  case SQLITE_NOMEM:
-  case SQLITE_READONLY:
-  case SQLITE_INTERRUPT:
-  case SQLITE_IOERR:
-  case SQLITE_FULL:
-  case SQLITE_CANTOPEN:
+  case SQLITE_TOOBIG:
+  case SQLITE_CONSTRAINT:
+  case SQLITE_MISMATCH:
     return true;
   default:
     return false;
@@ -150,7 +153,7 @@ static int commit_batch(kv_store *store) {
   if (!sqlite3_get_autocommit(store->db)) {
     (void)sqlite3_exec(store->db, "ROLLBACK", NULL, NULL, NULL);
   }
-  if (!failed || transient(rc)) {
+  if (!failed || !poison(rc)) {
     return -1;
   }
   change *bad = *failed;
@@ -160,6 +163,7 @@ static int commit_batch(kv_store *store) {
     store->batch_tail = failed;
   }
   store->batch_len--;
+  store->dropped++;
   free(bad);
   return 1;
 }
@@ -199,6 +203,7 @@ static void *writer_main(void *arg) {
       store->tail = &store->head;
       store->queued = 0;
     }
+    store->in_batch = store->batch_len;
     pthread_mutex_unlock(&store->mu);
 
     int rc = -1;
@@ -217,21 +222,24 @@ static void *writer_main(void *arg) {
       if (++final_tries == KV_STORE_FINAL_TRIES) {
         store->log.log(store->log.ctx, LOG_ERROR, "kv_store: dropping %zu uncommitted changes",
                        store->batch_len);
+        store->dropped += store->batch_len;
         return NULL;
       }
       nanosleep(&final_retry, NULL);
     }
     pthread_mutex_lock(&store->mu);
+    store->in_batch = store->batch_len;
   }
 }
 
-kv_store *kv_store_new(const char *db_path, int flush_interval_ms, logger log) {
+kv_store *kv_store_new(const char *db_path, int flush_interval_ms, logger log, size_t max_pending) {
   kv_store *store = calloc(1, sizeof(*store));
   if (!store) {
     return NULL;
   }
   store->log = log;
   store->flush_interval_ms = flush_interval_ms;
+  store->max_pending = max_pending;
   store->tail = &store->head;
   store->batch_tail = &store->batch;
 
@@ -301,7 +309,7 @@ int kv_store_free(kv_store *store) {
   pthread_mutex_unlock(&store->mu);
   pthread_join(store->writer, NULL);
 
-  int status = store->batch ? -1 : 0;
+  int status = store->dropped ? -1 : 0;
   change_free_all(store->head);
   change_free_all(store->batch);
   sqlite3_finalize(store->upsert);
@@ -326,7 +334,9 @@ int kv_store_put(kv_store *store, const char *key, const void *value, size_t val
     return -1;
   }
   pthread_mutex_lock(&store->mu);
-  int status = hashmap_put(store->map, key, value, value_len);
+  int status = store->queued + store->in_batch >= store->max_pending
+                   ? -2
+                   : hashmap_put(store->map, key, value, value_len);
   if (status == 0) {
     enqueue(store, c);
   }
@@ -343,7 +353,8 @@ int kv_store_del(kv_store *store, const char *key) {
     return -1;
   }
   pthread_mutex_lock(&store->mu);
-  int status = hashmap_del(store->map, key);
+  int status =
+      store->queued + store->in_batch >= store->max_pending ? -2 : hashmap_del(store->map, key);
   if (status == 1) {
     enqueue(store, c);
   }

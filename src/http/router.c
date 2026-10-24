@@ -1,5 +1,6 @@
 #include "http/router.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
@@ -173,24 +174,37 @@ router_status router_split(const router *rt, http_str path, char *buf, http_str 
 }
 
 /** Return the first route, in precedence order, for method with segments; NULL if none. */
+static bool route_matches(const route *candidate, const http_str *segments, size_t count) {
+  if (candidate->segment_count != count) {
+    return false;
+  }
+  for (size_t i = 0; i != count; i++) {
+    const route_segment *seg = &candidate->segments[i];
+    if (seg->is_param ? segments[i].len == 0
+                      : seg->text.len != segments[i].len ||
+                            memcmp(seg->text.ptr, segments[i].ptr, segments[i].len) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 const route *router_match(const router *rt, int method, const http_str *segments, size_t count) {
   for (size_t r = 0; r != rt->route_count; r++) {
     const route *candidate = &rt->routes[r];
-    if ((int)candidate->method != method || candidate->segment_count != count) {
-      continue;
-    }
-    size_t i = 0;
-    for (; i != count; i++) {
-      const route_segment *seg = &candidate->segments[i];
-      if (seg->is_param ? segments[i].len == 0
-                        : seg->text.len != segments[i].len ||
-                              memcmp(seg->text.ptr, segments[i].ptr, segments[i].len) != 0) {
-        break;
-      }
-    }
-    if (i == count) {
+    if ((int)candidate->method == method && route_matches(candidate, segments, count)) {
       return candidate;
     }
   }
   return NULL;
+}
+
+unsigned router_allowed(const router *rt, const http_str *segments, size_t count) {
+  unsigned mask = 0;
+  for (size_t r = 0; r != rt->route_count; r++) {
+    if (route_matches(&rt->routes[r], segments, count)) {
+      mask |= 1U << rt->routes[r].method;
+    }
+  }
+  return mask;
 }

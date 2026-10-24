@@ -40,13 +40,18 @@ expect_body() {
 
 for _ in 1 2 3; do
   # Routing
-  expect 404 -X PUT "$url/test"
+  expect 405 -X PUT "$url/test"
+  allow=$(curl -s -o /dev/null -X PUT -w '%header{allow}' "$url/test")
+  [ "$allow" = "GET, HEAD, POST, DELETE" ] || { echo "http_test: bad Allow: $allow" >&2; exit 1; }
   expect 404 "$url/no-such-path"
 
   # Normal lifecycle: put, get, overwrite, get, delete, then it's gone
   expect 200 -X POST -d '{"value":"hello"}' "$url/test"
   expect 200 "$url/test"
   expect_body '{"value":"hello"}' "$url/test"
+  expect 200 -I "$url/test"
+  len=$(curl -s -o /dev/null -I -w '%header{content-length}' "$url/test")
+  [ "$len" = 17 ] || { echo "http_test: HEAD content-length $len, want 17" >&2; exit 1; }
   expect 200 -X POST -d '{"value":"world"}' "$url/test"
   expect 200 "$url/test"
   expect_body '{"value":"world"}' "$url/test"

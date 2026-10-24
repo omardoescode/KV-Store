@@ -78,6 +78,11 @@ static void test_exact_segments(void) {
   size_t count = 0;
   assert(router_split(&rt, str("/kv/a"), buf, segments, &count) == ROUTER_OK);
   assert(router_match(&rt, HTTP_PUT, segments, count) == NULL);
+  assert(router_allowed(&rt, segments, count) == 1U << HTTP_GET);
+  assert(router_add(&rt, HTTP_DELETE, "/kv/{key}", handler_a, NULL) == 0);
+  assert(router_allowed(&rt, segments, count) == ((1U << HTTP_GET) | (1U << HTTP_DELETE)));
+  assert(router_split(&rt, str("/x/a"), buf, segments, &count) == ROUTER_OK);
+  assert(router_allowed(&rt, segments, count) == 0);
   router_free(&rt);
   printf("  test_exact_segments OK\n");
 }

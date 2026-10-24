@@ -124,7 +124,26 @@ static void run_chain(http_response *w, const http_request *r, http_chain *c) {
   c->rt->fn(w, r, b->arg);
 }
 
-/** Dispatch to the first route that matches path and method; return -1 if none. */
+/** Send 405 with an Allow header that lists the methods in mask. */
+static void send_405(h2o_req_t *req, unsigned mask) {
+  char allow[64];
+  size_t len = 0;
+  for (size_t i = 0; i != sizeof(method_names) / sizeof(method_names[0]); i++) {
+    if (mask & (1U << i)) {
+      len += (size_t)snprintf(allow + len, sizeof(allow) - len, "%s%.*s", len ? ", " : "",
+                              (int)method_names[i].len, method_names[i].base);
+    }
+  }
+  h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_ALLOW, NULL,
+                 h2o_strdup(&req->pool, allow, len).base, len);
+  h2o_send_error_generic(req, 405, "Method Not Allowed", "method not allowed",
+                         H2O_SEND_ERROR_KEEP_HEADERS);
+}
+
+/**
+ * Dispatch to the first route that matches path and method; HEAD falls back to the GET route.
+ * Send 405 if only other methods match the path; return -1 if no route matches it.
+ */
 static int on_req(h2o_handler_t *self, h2o_req_t *req) {
   const http_server *s = ((dispatcher *)self)->server;
   http_str path = {req->path.base, req->query_at != SIZE_MAX ? req->query_at : req->path.len};
@@ -138,10 +157,24 @@ static int on_req(h2o_handler_t *self, h2o_req_t *req) {
     h2o_send_error_400(req, "Bad Request", "invalid path", 0);
     return 0;
   }
-  const route *rt =
-      status == ROUTER_OK ? router_match(&s->routes, method_of(req->method), values, count) : NULL;
-  if (rt == NULL) {
+  if (status != ROUTER_OK) {
     return -1;
+  }
+  int method = method_of(req->method);
+  const route *rt = router_match(&s->routes, method, values, count);
+  if (rt == NULL && method == HTTP_HEAD) {
+    rt = router_match(&s->routes, HTTP_GET, values, count);
+  }
+  if (rt == NULL) {
+    unsigned allowed = router_allowed(&s->routes, values, count);
+    if (allowed == 0) {
+      return -1;
+    }
+    if (allowed & (1U << (unsigned)HTTP_GET)) {
+      allowed |= 1U << (unsigned)HTTP_HEAD;
+    }
+    send_405(req, allowed);
+    return 0;
   }
   struct http_request r = {req, rt, values};
   http_chain c = {s, rt, 0};
@@ -448,6 +481,34 @@ int http_default_threads(void) {
   return n > 0 ? (int)n : 1;
 }
 
+/** Resolve "host:port" or "[v6]:port" for a passive TCP socket; return NULL and set errno on error.
+ */
+static struct addrinfo *resolve(const char *addr) {
+  const char *colon = strrchr(addr, ':');
+  if (colon == NULL) {
+    errno = EINVAL;
+    return NULL;
+  }
+  size_t host_len = (size_t)(colon - addr);
+  if (host_len >= 2 && addr[0] == '[' && addr[host_len - 1] == ']') {
+    addr++;
+    host_len -= 2;
+  }
+  char *host = h2o_strdup(NULL, addr, host_len).base;
+  struct addrinfo hints = {.ai_socktype = SOCK_STREAM, .ai_flags = AI_PASSIVE};
+  struct addrinfo *ai = NULL;
+  int gai = getaddrinfo(*host != '\0' ? host : NULL, colon + 1, &hints, &ai);
+  free(host);
+  if (gai != 0) {
+    if (gai != EAI_SYSTEM) {
+      (void)fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(gai));
+      errno = EINVAL;
+    }
+    return NULL;
+  }
+  return ai;
+}
+
 /**
  * Bind host:port and serve with threads event loops, including the calling thread.
  * Requires threads >= 1. Returns 0 after http_server_stop once every loop has stopped, or -1
@@ -455,16 +516,12 @@ int http_default_threads(void) {
  * stopped and closed before it returns.
  */
 int http_listen_and_serve(http_server *s, const char *addr, int threads) {
-  const char *colon = strrchr(addr, ':');
-  if (colon == NULL || threads < 1) {
+  if (threads < 1) {
+    errno = EINVAL;
     return -1;
   }
-  char *host = h2o_strdup(NULL, addr, (size_t)(colon - addr)).base;
-  struct addrinfo hints = {.ai_socktype = SOCK_STREAM, .ai_flags = AI_PASSIVE};
-  struct addrinfo *ai = NULL;
-  int gai = getaddrinfo(*host != '\0' ? host : NULL, colon + 1, &hints, &ai);
-  free(host);
-  if (gai != 0) {
+  struct addrinfo *ai = resolve(addr);
+  if (ai == NULL) {
     return -1;
   }
 

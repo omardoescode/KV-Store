@@ -7,6 +7,8 @@ typedef struct {
   const char *log_path;
   const char *db_path;
   int flush_interval_ms;
+  /** Changes that may wait for the database before POST/DELETE fail with 503. */
+  long max_pending;
   /** 0 means one event loop per usable CPU. */
   int threads;
 } kv_config;

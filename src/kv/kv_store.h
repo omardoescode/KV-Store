@@ -10,9 +10,10 @@ typedef struct kv_store kv_store;
  * Load every row of the SQLite database at db_path into memory, then start a writer thread that
  * commits queued changes every flush_interval_ms (>= 1). The writer thread reports failed
  * commits to log; it keeps the changes and retries them, but drops a change that cannot commit
- * whatever the database state. Returns NULL on error.
+ * whatever the database state. Put and delete fail while max_pending (>= 1) changes wait for the
+ * database. Returns NULL on error.
  */
-kv_store *kv_store_new(const char *db_path, int flush_interval_ms, logger log);
+kv_store *kv_store_new(const char *db_path, int flush_interval_ms, logger log, size_t max_pending);
 
 /**
  * Stop the writer thread after it commits the queued changes, then free the store. Returns 0, or
@@ -28,13 +29,14 @@ int kv_store_get(kv_store *store, const char *key, void **out_value, size_t *out
 
 /**
  * Stores a copy of value under the key and queues it for the database. Does no IO.
- * Returns 0 on success, -1 on error.
+ * Returns 0 on success, -1 on error, -2 if max_pending changes wait (the map is unchanged).
  */
 int kv_store_put(kv_store *store, const char *key, const void *value, size_t value_len);
 
 /**
  * Removes the key and queues the removal for the database. Does no IO.
- * Returns 1 if removed, 0 if missing, -1 on error.
+ * Returns 1 if removed, 0 if missing, -1 on error, -2 if max_pending changes wait (the map is
+ * unchanged).
  */
 int kv_store_del(kv_store *store, const char *key);
 

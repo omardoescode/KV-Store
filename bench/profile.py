@@ -55,6 +55,8 @@ def parse_args():
         p.error('--mix: want integers, e.g. 100,95,50,0')
     if any(not 0 <= m <= 100 for m in args.mix):
         p.error('--mix: each read % must be 0..100')
+    if len(set(args.mix)) != len(args.mix):
+        p.error('--mix: each read % only once')
     return args
 
 
@@ -187,7 +189,7 @@ def perf_outputs(args, step, label, mix_dir):
 
 def run_mix(args, read_pct, run_dir):
     mix_dir = os.path.join(run_dir, f'mix-{read_pct}')
-    os.makedirs(mix_dir)
+    os.makedirs(mix_dir, exist_ok=True)
     base_url = f'http://{args.addr}'
     result = {'mix': read_pct, 'steps': [], 'profiles': [], 'server_exit': None, 'perf_stat': None}
     server = perf_stat = None

@@ -47,7 +47,9 @@ int config_load(kv_config *cfg) {
 
   long flush_ms = 100;
   long threads = 0;
-  if (env_long("KV_FLUSH_INTERVAL_MS", &flush_ms) != 0 || env_long("KV_THREADS", &threads) != 0) {
+  long max_pending = 1000000;
+  if (env_long("KV_FLUSH_INTERVAL_MS", &flush_ms) != 0 || env_long("KV_THREADS", &threads) != 0 ||
+      env_long("KV_MAX_PENDING", &max_pending) != 0) {
     return -1;
   }
   if (flush_ms < 1 || flush_ms > 3600000) {
@@ -58,7 +60,12 @@ int config_load(kv_config *cfg) {
     (void)fprintf(stderr, "config: KV_THREADS=%ld must be in [0, 1024]\n", threads);
     return -1;
   }
+  if (max_pending < 1 || max_pending > 1000000000) {
+    (void)fprintf(stderr, "config: KV_MAX_PENDING=%ld must be in [1, 1000000000]\n", max_pending);
+    return -1;
+  }
   cfg->flush_interval_ms = (int)flush_ms;
+  cfg->max_pending = max_pending;
   cfg->threads = (int)threads;
   return 0;
 }

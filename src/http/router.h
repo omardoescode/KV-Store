@@ -62,4 +62,7 @@ router_status router_split(const router *rt, http_str path, char *buf, http_str 
  */
 const route *router_match(const router *rt, int method, const http_str *segments, size_t count);
 
+/** Return a mask with bit (1U << method) set for each method that has a route matching segments. */
+unsigned router_allowed(const router *rt, const http_str *segments, size_t count);
+
 #endif

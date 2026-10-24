@@ -121,7 +121,6 @@ static void kv_get_handler(http_response *response, const http_request *request,
     return;
   }
 
-  // Build the {"value": ...} object.
   json_builder *b = json_builder_new();
   json_node *r = json_new_obj(b);
   // An empty value comes back as NULL, and json_new_str(b, NULL, 0) fails.
@@ -131,7 +130,6 @@ static void kv_get_handler(http_response *response, const http_request *request,
                     ? json_to_bytes(r, &len)
                     : NULL;
 
-  // Send out one response
   if (bytes != NULL) {
     http_set_header(response, HTTP_STR("content-type"), HTTP_STR("application/json"));
     http_write(response, 200, bytes, len);
@@ -173,7 +171,13 @@ static void kv_post_handler(http_response *response, const http_request *request
   int put_value = kv_store_put(store, key, value, value_len);
   json_doc_free(doc);
   free(key);
-  http_write(response, put_value != 0 ? 500 : 200, NULL, 0);
+  int code = 200;
+  if (put_value == -2) {
+    code = 503;
+  } else if (put_value != 0) {
+    code = 500;
+  }
+  http_write(response, code, NULL, 0);
 }
 
 /**
@@ -196,7 +200,13 @@ static void kv_del_handler(http_response *response, const http_request *request,
     http_write(response, 404, message, sizeof(message) - 1);
     return;
   }
-  http_write(response, del_value < 0 ? 500 : 200, NULL, 0);
+  int code = 200;
+  if (del_value == -2) {
+    code = 503;
+  } else if (del_value < 0) {
+    code = 500;
+  }
+  http_write(response, code, NULL, 0);
 }
 
 void kv_register_routes(http_server *server, kv_store *store, logger *log) {
