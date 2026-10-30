@@ -1,3 +1,12 @@
+# This is a multi-stage build.
+# The first stage installs the build time libraries and compiles the application
+# The second stage installs the runtime libraries only and copies the compiled binary from the previous stage.
+# This dockerfile assumes it's run in the context of `https://github.com/omardoescode/KV-Store`
+
+# Instead of cloning the repo, you can run these commands
+# Build: docker build -t kv-store https://github.com/omardoescode/KV-Store.git
+# Run:   docker run -p 7890:7890 kv-store
+
 FROM debian:bookworm AS build
 
 RUN apt-get update \
