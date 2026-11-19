@@ -119,6 +119,25 @@ expect_body '{"value":"c"}' "$url/ver"
 expect 400 -X POST -H "$v: x1" -d '{"value":"c"}' "$url/ver"
 expect 400 -X DELETE -H "$v: -1" "$url/ver"
 
+# Internal API for cp
+expect 200 "$url/_internal/health"
+expect 200 -X POST -d '{"items":[{"key":"b1","value":"x","version":5,"deleted":false},{"key":"b2","value":"","version":5,"deleted":true}]}' "$url/_internal/batch"
+expect_body '{"value":"x"}' "$url/b1"
+expect 404 "$url/b2"
+expect 200 -X POST -d '{"items":[{"key":"b1","value":"stale","version":3,"deleted":false}]}' "$url/_internal/batch"
+expect_body '{"value":"x"}' "$url/b1"
+expect 400 -X POST -d '{"items":[{"key":"b1"}]}' "$url/_internal/batch"
+expect 400 -X POST -d 'nope' "$url/_internal/batch"
+sleep 0.5
+expect_body '{"items":[{"key":"b1","value":"x","version":5,"deleted":false},{"key":"b2","value":"","version":5,"deleted":true}],"next":"b2"}' "$url/_internal/dump?cursor=b0&limit=2"
+# Earlier deletes left tombstones for "test" and "é"
+expect_body '{"items":[{"key":"b2","value":"","version":5,"deleted":true},{"key":"test","value":"","version":0,"deleted":true},{"key":"ver","value":"c","version":30,"deleted":false},{"key":"é","value":"","version":0,"deleted":true}],"next":null}' "$url/_internal/dump?cursor=b1&limit=10"
+expect 400 "$url/_internal/dump?limit=0"
+expect 200 -X POST -d '{"keys":["b1"]}' "$url/_internal/delete-batch"
+expect 404 "$url/b1"
+sleep 0.5
+expect_body '{"items":[{"key":"b2","value":"","version":5,"deleted":true}],"next":"b2"}' "$url/_internal/dump?cursor=b0&limit=1"
+
 kill -TERM "$pid"
 status=0
 wait "$pid" || status=$?

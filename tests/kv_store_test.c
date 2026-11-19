@@ -26,6 +26,11 @@ static void count_errors(void *ctx, log_level level, const char *fmt, ...) {
 
 static const logger test_log = {count_errors, NULL};
 
+static kv_store *open_store(const char *db, int flush_interval_ms, size_t max_pending) {
+  kv_store_options opt = {db, flush_interval_ms, max_pending, 3600};
+  return kv_store_new(&opt, test_log);
+}
+
 static void expect_value(kv_store *store, const char *key, const void *want, size_t want_len) {
   void *got = NULL;
   size_t got_len = 0;
@@ -39,7 +44,7 @@ static void test_values_survive_restart(const char *db) {
   static const char multiline[] = "line one\nline two\n";
   static const char binary[] = {'\0', '\x01', '\xff', '\n', '\r', ' ', '\0'};
 
-  kv_store *store = kv_store_new(db, 10, test_log, 1000000);
+  kv_store *store = open_store(db, 10, 1000000);
   assert(store);
   assert(kv_store_put(store, "multi", multiline, sizeof(multiline) - 1, 0) == 0);
   assert(kv_store_put(store, "bin", binary, sizeof(binary), 0) == 0);
@@ -51,7 +56,7 @@ static void test_values_survive_restart(const char *db) {
   assert(kv_store_del(store, "gone", 0) == 1);
   assert(kv_store_free(store) == 0);
 
-  store = kv_store_new(db, 10, test_log, 1000000);
+  store = open_store(db, 10, 1000000);
   assert(store);
   expect_value(store, "multi", multiline, sizeof(multiline) - 1);
   expect_value(store, "bin", binary, sizeof(binary));
@@ -78,7 +83,7 @@ static int count_rows(sqlite3 *db, const char *key) {
 }
 
 static void test_failed_commit_keeps_changes(const char *db) {
-  kv_store *store = kv_store_new(db, 10, test_log, 1000000);
+  kv_store *store = open_store(db, 10, 1000000);
   assert(store);
 
   sqlite3 *locker = NULL;
@@ -98,7 +103,7 @@ static void test_failed_commit_keeps_changes(const char *db) {
   sqlite3_close(locker);
   assert(kv_store_free(store) == 0);
 
-  store = kv_store_new(db, 10, test_log, 1000000);
+  store = open_store(db, 10, 1000000);
   assert(store);
   expect_value(store, "late", "kept\n", 5);
   assert(kv_store_free(store) == 0);
@@ -106,7 +111,7 @@ static void test_failed_commit_keeps_changes(const char *db) {
 }
 
 static void test_locked_shutdown_is_quick_and_fails(const char *db) {
-  kv_store *store = kv_store_new(db, 3600000, test_log, 1000000);
+  kv_store *store = open_store(db, 3600000, 1000000);
   assert(store);
   sqlite3 *locker = NULL;
   assert(sqlite3_open(db, &locker) == SQLITE_OK);
@@ -125,7 +130,7 @@ static void test_locked_shutdown_is_quick_and_fails(const char *db) {
 }
 
 static void test_dropped_table_keeps_changes(const char *db) {
-  kv_store *store = kv_store_new(db, 10, test_log, 1000000);
+  kv_store *store = open_store(db, 10, 1000000);
   assert(store);
   sqlite3 *other = NULL;
   assert(sqlite3_open(db, &other) == SQLITE_OK);
@@ -148,7 +153,7 @@ static void test_dropped_table_keeps_changes(const char *db) {
   sqlite3_close(other);
   assert(kv_store_free(store) == 0);
 
-  store = kv_store_new(db, 10, test_log, 1000000);
+  store = open_store(db, 10, 1000000);
   assert(store);
   expect_value(store, "a", "1", 1);
   expect_value(store, "b", "2", 1);
@@ -157,7 +162,7 @@ static void test_dropped_table_keeps_changes(const char *db) {
 }
 
 static void test_pending_limit(const char *db) {
-  kv_store *store = kv_store_new(db, 3600000, test_log, 2);
+  kv_store *store = open_store(db, 3600000, 2);
   assert(store);
   assert(kv_store_put(store, "p1", "1", 1, 0) == 0);
   assert(kv_store_put(store, "p2", "2", 1, 0) == 0);
@@ -169,7 +174,7 @@ static void test_pending_limit(const char *db) {
   expect_value(store, "p1", "1", 1);
   assert(kv_store_free(store) == 0);
 
-  store = kv_store_new(db, 10, test_log, 2);
+  store = open_store(db, 10, 2);
   assert(store);
   assert(kv_store_put(store, "p3", "3", 1, 0) == 0);
   assert(kv_store_put(store, "p4", "4", 1, 0) == 0);
@@ -195,7 +200,7 @@ static void test_failing_change_does_not_block_others(const char *db) {
                    NULL, NULL, NULL) == SQLITE_OK);
   sqlite3_close(setup);
 
-  kv_store *store = kv_store_new(db, 3600000, test_log, 1000000);
+  kv_store *store = open_store(db, 3600000, 1000000);
   assert(store);
   atomic_store(&errors, 0);
   assert(kv_store_put(store, "before", "1", 1, 0) == 0);
@@ -204,7 +209,7 @@ static void test_failing_change_does_not_block_others(const char *db) {
   assert(kv_store_free(store) == -1);
   assert(atomic_load(&errors) >= 1);
 
-  store = kv_store_new(db, 3600000, test_log, 1000000);
+  store = open_store(db, 3600000, 1000000);
   assert(store);
   expect_value(store, "before", "1", 1);
   expect_value(store, "after", "3", 1);
