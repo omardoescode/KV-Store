@@ -6,8 +6,8 @@
 #include <string.h>
 
 static const char *const VARS[] = {
-    "KV_LISTEN_ADDR", "KV_LOG_PATH",          "KV_DB_PATH",
-    "KV_THREADS",     "KV_FLUSH_INTERVAL_MS", "KV_MAX_PENDING",
+    "KV_LISTEN_ADDR",       "KV_LOG_PATH",    "KV_DB_PATH",  "KV_THREADS",
+    "KV_FLUSH_INTERVAL_MS", "KV_MAX_PENDING", "KV_SYNC_ACK", "KV_TOMBSTONE_TTL_S",
 };
 
 static void set_required(void) {
@@ -29,6 +29,8 @@ static void test_required_set_uses_optional_defaults(void) {
   assert(cfg.flush_interval_ms == 100);
   assert(cfg.threads == 0);
   assert(cfg.max_pending == 1000000);
+  assert(cfg.sync_ack == 0);
+  assert(cfg.tombstone_ttl_s == 3600);
   printf("  test_required_set_uses_optional_defaults OK\n");
 }
 
@@ -40,6 +42,8 @@ static void test_overrides(void) {
   setenv("KV_FLUSH_INTERVAL_MS", "250", 1);
   setenv("KV_THREADS", "4", 1);
   setenv("KV_MAX_PENDING", "5", 1);
+  setenv("KV_SYNC_ACK", "1", 1);
+  setenv("KV_TOMBSTONE_TTL_S", "60", 1);
   kv_config cfg;
   assert(config_load(&cfg) == 0);
   assert(strcmp(cfg.listen_addr, "0.0.0.0:8080") == 0);
@@ -48,6 +52,8 @@ static void test_overrides(void) {
   assert(cfg.flush_interval_ms == 250);
   assert(cfg.threads == 4);
   assert(cfg.max_pending == 5);
+  assert(cfg.sync_ack == 1);
+  assert(cfg.tombstone_ttl_s == 60);
   printf("  test_overrides OK\n");
 }
 
@@ -99,6 +105,9 @@ static void test_bad_numbers(void) {
   expect_bad("KV_FLUSH_INTERVAL_MS", " ");
   expect_bad("KV_MAX_PENDING", "0");
   expect_bad("KV_MAX_PENDING", "1000000001");
+  expect_bad("KV_SYNC_ACK", "2");
+  expect_bad("KV_SYNC_ACK", "-1");
+  expect_bad("KV_TOMBSTONE_TTL_S", "0");
   printf("  test_bad_numbers OK\n");
 }
 

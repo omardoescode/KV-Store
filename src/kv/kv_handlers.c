@@ -94,6 +94,31 @@ static char *key_copy(http_response *response, const http_request *request, size
 }
 
 /**
+ * Set *version from the x-kv-version header that cp sends, or to 0 if absent. On a value that is
+ * not a decimal uint64, respond 400 and return -1.
+ */
+static int version_of(http_response *response, const http_request *request, uint64_t *version) {
+  http_str h = http_req_header(request, HTTP_STR("x-kv-version"));
+  uint64_t v = 0;
+  for (size_t i = 0; i != h.len; i++) {
+    unsigned digit = (unsigned)(unsigned char)h.ptr[i] - '0';
+    if (digit > 9 || v > (UINT64_MAX - digit) / 10) {
+      static const char message[] = "x-kv-version must be a uint64\n";
+      http_write(response, 400, message, sizeof(message) - 1);
+      return -1;
+    }
+    v = (v * 10) + digit;
+  }
+  if (h.ptr != NULL && h.len == 0) {
+    static const char message[] = "x-kv-version must be a uint64\n";
+    http_write(response, 400, message, sizeof(message) - 1);
+    return -1;
+  }
+  *version = v;
+  return 0;
+}
+
+/**
  * Route the HTTP GET request to kv_store to then access the hashmap.
  */
 static void kv_get_handler(http_response *response, const http_request *request, void *arg) {
@@ -148,6 +173,10 @@ static void kv_get_handler(http_response *response, const http_request *request,
  */
 static void kv_post_handler(http_response *response, const http_request *request, void *arg) {
   kv_store *store = arg;
+  uint64_t version;
+  if (version_of(response, request, &version) != 0) {
+    return;
+  }
   size_t key_len;
   char *key = key_copy(response, request, &key_len);
   if (!key) {
@@ -168,7 +197,7 @@ static void kv_post_handler(http_response *response, const http_request *request
   }
 
   // Put the value.
-  int put_value = kv_store_put(store, key, value, value_len);
+  int put_value = kv_store_put(store, key, value, value_len, version);
   json_doc_free(doc);
   free(key);
   int code = 200;
@@ -185,6 +214,10 @@ static void kv_post_handler(http_response *response, const http_request *request
  */
 static void kv_del_handler(http_response *response, const http_request *request, void *arg) {
   kv_store *store = arg;
+  uint64_t version;
+  if (version_of(response, request, &version) != 0) {
+    return;
+  }
   size_t key_len;
   char *key = key_copy(response, request, &key_len);
   if (!key) {
@@ -192,7 +225,7 @@ static void kv_del_handler(http_response *response, const http_request *request,
   }
 
   // Delete the value.
-  int del_value = kv_store_del(store, key);
+  int del_value = kv_store_del(store, key, version);
   free(key);
 
   if (del_value == 0) { // key not found

@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,22 +17,51 @@
 // Longest pause between shutdown commit attempts, so a long flush interval cannot stall exit.
 #define KV_STORE_FINAL_RETRY_MS 100
 
-/** One queued put (deleted false) or delete, in one allocation: key, then '\0', then value. */
+/** The prefix of each map value; the value bytes follow it. deleted: unix ms, 0 if live. */
+typedef struct {
+  uint64_t version;
+  int64_t deleted;
+} entry_head;
+
+/** One queued put (deleted 0) or tombstone, in one allocation: key, then '\0', then value. */
 typedef struct change {
   struct change *next;
-  bool deleted;
+  // Removes the row instead of writing it.
+  bool remove;
+  uint64_t version;
+  // Unix ms of the delete, 0 for a put.
+  int64_t deleted;
   size_t value_len;
   char *value;
   char key[];
 } change;
 
+typedef struct flush_waiter {
+  struct flush_waiter *next;
+  // Fires once every change up to this sequence number is committed.
+  uint64_t seq;
+  kv_flush_fn fn;
+  void *ctx;
+} flush_waiter;
+
 struct kv_store {
   hashmap *map;
   logger log;
   int flush_interval_ms;
+  int64_t tombstone_ttl_ms;
   sqlite3 *db;
   sqlite3_stmt *upsert;
   sqlite3_stmt *remove;
+  sqlite3_stmt *purge_select;
+  sqlite3_stmt *purge_delete;
+  // A second connection for kv_store_dump, which runs on caller threads. Guarded by reader_mu.
+  sqlite3 *reader;
+  sqlite3_stmt *dump;
+  pthread_mutex_t reader_mu;
+  // Held for a whole purge round, so kv_store_pause_purge returns only when none runs.
+  pthread_mutex_t purge_mu;
+  bool purge_paused;
+  int64_t last_purge_ms;
   pthread_t writer;
   pthread_mutex_t mu;
   pthread_cond_t wake;
@@ -43,6 +73,11 @@ struct kv_store {
   size_t in_batch;
   size_t max_pending;
   bool stop;
+  // Sequence number of the last queued change, and of the last committed one. Guarded by mu.
+  uint64_t last_seq;
+  uint64_t committed_seq;
+  // Flush waiters not fired yet. Guarded by mu.
+  flush_waiter *waiters;
   // Changes the writer took but did not commit yet, oldest first. Writer thread only.
   change *batch;
   change **batch_tail;
@@ -51,14 +86,16 @@ struct kv_store {
   size_t dropped;
 };
 
-static change *change_new(const char *key, const void *value, size_t value_len, bool deleted) {
+static change *change_new(const char *key, const void *value, size_t value_len, entry_head head) {
   size_t key_len = strlen(key);
   change *c = malloc(sizeof(*c) + key_len + 1 + value_len);
   if (!c) {
     return NULL;
   }
   c->next = NULL;
-  c->deleted = deleted;
+  c->remove = false;
+  c->version = head.version;
+  c->deleted = head.deleted;
   c->value_len = value_len;
   memcpy(c->key, key, key_len + 1);
   c->value = c->key + key_len + 1;
@@ -78,6 +115,7 @@ static void change_free_all(change *c) {
 
 /** Append c to the queue. Call with mu held. */
 static void enqueue(kv_store *store, change *c) {
+  store->last_seq++;
   *store->tail = c;
   store->tail = &c->next;
   if (++store->queued == KV_STORE_WAKE_LEN) {
@@ -85,9 +123,63 @@ static void enqueue(kv_store *store, change *c) {
   }
 }
 
+/** Put head and value_len bytes of value under key in the map. Returns 0, or -1 on error. */
+static int map_put(hashmap *map, const char *key, entry_head head, const void *value,
+                   size_t value_len) {
+  unsigned char stack[256];
+  size_t len = sizeof(head) + value_len;
+  unsigned char *buf = len <= sizeof(stack) ? stack : malloc(len);
+  if (!buf) {
+    return -1;
+  }
+  memcpy(buf, &head, sizeof(head));
+  if (value_len) {
+    memcpy(buf + sizeof(head), value, value_len);
+  }
+  int rc = hashmap_put(map, key, buf, len);
+  if (buf != stack) {
+    free(buf);
+  }
+  return rc;
+}
+
+/**
+ * Read the head of key's map entry into *head. Returns 1 if found, 0 if missing, -1 on error.
+ * If value is not NULL, set *value to a malloc buffer that holds the value at its start.
+ */
+static int map_get(hashmap *map, const char *key, entry_head *head, void **value,
+                   size_t *value_len) {
+  void *raw = NULL;
+  size_t len = 0;
+  int rc = hashmap_get(map, key, &raw, &len);
+  if (rc != 1) {
+    return rc;
+  }
+  if (len < sizeof(*head)) {
+    free(raw);
+    return -1;
+  }
+  memcpy(head, raw, sizeof(*head));
+  if (value) {
+    *value_len = len - sizeof(*head);
+    memmove(raw, (unsigned char *)raw + sizeof(*head), *value_len);
+    *value = raw;
+  } else {
+    free(raw);
+  }
+  return 1;
+}
+
+static int64_t now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  return ((int64_t)ts.tv_sec * 1000) + (ts.tv_nsec / 1000000);
+}
+
 static int load_rows(kv_store *store) {
   sqlite3_stmt *select = NULL;
-  if (sqlite3_prepare_v2(store->db, "SELECT key, value FROM kv", -1, &select, NULL) != SQLITE_OK) {
+  if (sqlite3_prepare_v2(store->db, "SELECT key, value, version, deleted FROM kv", -1, &select,
+                         NULL) != SQLITE_OK) {
     return -1;
   }
   int rc;
@@ -95,12 +187,39 @@ static int load_rows(kv_store *store) {
     const unsigned char *key = sqlite3_column_text(select, 0);
     const void *value = sqlite3_column_blob(select, 1);
     size_t value_len = (size_t)sqlite3_column_bytes(select, 1);
-    if (!key || hashmap_put(store->map, (const char *)key, value, value_len) != 0) {
+    entry_head head = {(uint64_t)sqlite3_column_int64(select, 2), sqlite3_column_int64(select, 3)};
+    if (!key || map_put(store->map, (const char *)key, head, value, value_len) != 0) {
       break;
     }
   }
   sqlite3_finalize(select);
   return rc == SQLITE_DONE ? 0 : -1;
+}
+
+/** Add the version and deleted columns to a kv table made before they existed. */
+static int upgrade_schema(sqlite3 *db) {
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2(db, "SELECT count(*) FROM pragma_table_info('kv') WHERE name = 'version'",
+                         -1, &stmt, NULL) != SQLITE_OK) {
+    return -1;
+  }
+  int rc = sqlite3_step(stmt);
+  int has_version = rc == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1;
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_ROW) {
+    return -1;
+  }
+  if (has_version) {
+    return 0;
+  }
+  return sqlite3_exec(db,
+                      "BEGIN;"
+                      "ALTER TABLE kv ADD COLUMN version INTEGER NOT NULL DEFAULT 0;"
+                      "ALTER TABLE kv ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;"
+                      "COMMIT;",
+                      NULL, NULL, NULL) == SQLITE_OK
+             ? 0
+             : -1;
 }
 
 /**
@@ -118,6 +237,25 @@ static bool poison(int rc) {
   }
 }
 
+/** Bind the columns of c to stmt, the remove or upsert statement. Returns an SQLite code. */
+static int bind_change(sqlite3_stmt *stmt, const change *c) {
+  int rc = sqlite3_bind_text(stmt, 1, c->key, -1, SQLITE_STATIC);
+  if (c->remove) {
+    return rc;
+  }
+  if (rc == SQLITE_OK) {
+    // c->value is never NULL, so an empty value binds as an empty blob, not NULL.
+    rc = sqlite3_bind_blob64(stmt, 2, c->value, c->value_len, SQLITE_STATIC);
+  }
+  if (rc == SQLITE_OK) {
+    rc = sqlite3_bind_int64(stmt, 3, (sqlite3_int64)c->version);
+  }
+  if (rc == SQLITE_OK) {
+    rc = sqlite3_bind_int64(stmt, 4, c->deleted);
+  }
+  return rc;
+}
+
 /**
  * Commit the batch in one transaction and return 0. On error, log it, roll back, and return -1;
  * or return 1 if the error came from one change that cannot succeed, after it drops that change.
@@ -127,12 +265,8 @@ static int commit_batch(kv_store *store) {
   change **failed = NULL;
   for (change **link = &store->batch; *link && rc == SQLITE_OK; link = &(*link)->next) {
     change *c = *link;
-    sqlite3_stmt *stmt = c->deleted ? store->remove : store->upsert;
-    rc = sqlite3_bind_text(stmt, 1, c->key, -1, SQLITE_STATIC);
-    if (rc == SQLITE_OK && !c->deleted) {
-      // c->value is never NULL, so an empty value binds as an empty blob, not NULL.
-      rc = sqlite3_bind_blob64(stmt, 2, c->value, c->value_len, SQLITE_STATIC);
-    }
+    sqlite3_stmt *stmt = c->remove ? store->remove : store->upsert;
+    rc = bind_change(stmt, c);
     if (rc == SQLITE_OK) {
       rc = sqlite3_step(stmt);
       rc = rc == SQLITE_DONE ? SQLITE_OK : rc;
@@ -269,11 +403,15 @@ kv_store *kv_store_new(const char *db_path, int flush_interval_ms, logger log, s
       sqlite3_exec(store->db,
                    "PRAGMA journal_mode=WAL;"
                    "PRAGMA synchronous=FULL;"
-                   "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID;",
+                   "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value BLOB,"
+                   " version INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0)"
+                   " WITHOUT ROWID;",
                    NULL, NULL, NULL) != SQLITE_OK ||
+      upgrade_schema(store->db) != 0 ||
       sqlite3_prepare_v2(store->db,
-                         "INSERT INTO kv(key, value) VALUES(?1, ?2)"
-                         " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                         "INSERT INTO kv(key, value, version, deleted) VALUES(?1, ?2, ?3, ?4)"
+                         " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+                         " version = excluded.version, deleted = excluded.deleted",
                          -1, &store->upsert, NULL) != SQLITE_OK ||
       sqlite3_prepare_v2(store->db, "DELETE FROM kv WHERE key = ?1", -1, &store->remove, NULL) !=
           SQLITE_OK ||
@@ -323,44 +461,71 @@ int kv_store_free(kv_store *store) {
 }
 
 int kv_store_get(kv_store *store, const char *key, void **out_value, size_t *out_len) {
-  return hashmap_get(store->map, key, out_value, out_len);
+  entry_head head;
+  void *value = NULL;
+  size_t len = 0;
+  int rc = map_get(store->map, key, &head, &value, &len);
+  if (rc != 1 || head.deleted) {
+    free(value);
+    *out_value = NULL;
+    *out_len = 0;
+    return rc == 1 ? 0 : rc;
+  }
+  if (len == 0) {
+    free(value);
+    value = NULL;
+  }
+  *out_value = value;
+  *out_len = len;
+  return 1;
 }
 
-// Map and queue change under one lock so the queue holds changes in map order, and the database
-// ends with the value the map holds.
-int kv_store_put(kv_store *store, const char *key, const void *value, size_t value_len) {
-  change *c = change_new(key, value, value_len, false);
+/**
+ * Apply a put (deleted 0) or tombstone with version to the map and queue it, unless the stored
+ * version is higher. Map and queue change under one lock so the queue holds changes in map order,
+ * and the database ends with the entry the map holds. Returns 1 if applied and a live value was
+ * there before, 0 if applied and none was, 2 if ignored, -1 on error, -2 if max_pending changes
+ * wait (the map is unchanged).
+ */
+static int apply(kv_store *store, const char *key, const void *value, size_t value_len,
+                 entry_head head) {
+  change *c = change_new(key, value, value_len, head);
   if (!c) {
     return -1;
   }
   pthread_mutex_lock(&store->mu);
-  int status = store->queued + store->in_batch >= store->max_pending
-                   ? -2
-                   : hashmap_put(store->map, key, value, value_len);
-  if (status == 0) {
+  entry_head old = {0, 0};
+  int status = -2;
+  if (store->queued + store->in_batch < store->max_pending) {
+    int found = map_get(store->map, key, &old, NULL, NULL);
+    if (found < 0) {
+      status = -1;
+    } else if (found && head.version < old.version) {
+      status = 2;
+    } else {
+      status = found && !old.deleted ? 1 : 0;
+      if (map_put(store->map, key, head, value, value_len) != 0) {
+        status = -1;
+      }
+    }
+  }
+  if (status == 0 || status == 1) {
     enqueue(store, c);
   }
   pthread_mutex_unlock(&store->mu);
-  if (status != 0) {
+  if (status != 0 && status != 1) {
     free(c);
   }
   return status;
 }
 
-int kv_store_del(kv_store *store, const char *key) {
-  change *c = change_new(key, NULL, 0, true);
-  if (!c) {
-    return -1;
-  }
-  pthread_mutex_lock(&store->mu);
-  int status =
-      store->queued + store->in_batch >= store->max_pending ? -2 : hashmap_del(store->map, key);
-  if (status == 1) {
-    enqueue(store, c);
-  }
-  pthread_mutex_unlock(&store->mu);
-  if (status != 1) {
-    free(c);
-  }
-  return status;
+int kv_store_put(kv_store *store, const char *key, const void *value, size_t value_len,
+                 uint64_t version) {
+  int rc = apply(store, key, value, value_len, (entry_head){version, 0});
+  return rc >= 0 ? 0 : rc;
+}
+
+int kv_store_del(kv_store *store, const char *key, uint64_t version) {
+  int rc = apply(store, key, NULL, 0, (entry_head){version, now_ms()});
+  return rc == 2 ? 1 : rc;
 }

@@ -48,8 +48,11 @@ int config_load(kv_config *cfg) {
   long flush_ms = 100;
   long threads = 0;
   long max_pending = 1000000;
+  long sync_ack = 0;
+  long ttl_s = 3600;
   if (env_long("KV_FLUSH_INTERVAL_MS", &flush_ms) != 0 || env_long("KV_THREADS", &threads) != 0 ||
-      env_long("KV_MAX_PENDING", &max_pending) != 0) {
+      env_long("KV_MAX_PENDING", &max_pending) != 0 || env_long("KV_SYNC_ACK", &sync_ack) != 0 ||
+      env_long("KV_TOMBSTONE_TTL_S", &ttl_s) != 0) {
     return -1;
   }
   if (flush_ms < 1 || flush_ms > 3600000) {
@@ -64,6 +67,16 @@ int config_load(kv_config *cfg) {
     (void)fprintf(stderr, "config: KV_MAX_PENDING=%ld must be in [1, 1000000000]\n", max_pending);
     return -1;
   }
+  if (sync_ack != 0 && sync_ack != 1) {
+    (void)fprintf(stderr, "config: KV_SYNC_ACK=%ld must be 0 or 1\n", sync_ack);
+    return -1;
+  }
+  if (ttl_s < 1 || ttl_s > 31536000) {
+    (void)fprintf(stderr, "config: KV_TOMBSTONE_TTL_S=%ld must be in [1, 31536000]\n", ttl_s);
+    return -1;
+  }
+  cfg->sync_ack = (int)sync_ack;
+  cfg->tombstone_ttl_s = ttl_s;
   cfg->flush_interval_ms = (int)flush_ms;
   cfg->max_pending = max_pending;
   cfg->threads = (int)threads;
