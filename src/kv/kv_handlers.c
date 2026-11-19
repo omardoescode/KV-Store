@@ -168,11 +168,45 @@ static void kv_get_handler(http_response *response, const http_request *request,
   free(key);
 }
 
+typedef struct {
+  http_deferred *d;
+  int status;
+  const char *message;
+} commit_wait;
+
+static void on_committed(void *ctx, int status) {
+  commit_wait *w = ctx;
+  int code = status == 0 ? w->status : 500;
+  const char *message = status == 0 ? w->message : "";
+  http_resume(w->d, code, NULL, 0, message, strlen(message));
+  free(w);
+}
+
 /**
- * Route the HTTP POST request to kv_store to then access the hashmap.
+ * Respond status with the static message, after the change is committed if sync and the change
+ * was applied (200 or 404).
  */
-static void kv_post_handler(http_response *response, const http_request *request, void *arg) {
-  kv_store *store = arg;
+static void respond_change(http_response *response, kv_store *store, bool sync, int status,
+                           const char *message) {
+  if (!sync || (status != 200 && status != 404)) {
+    http_write(response, status, message, strlen(message));
+    return;
+  }
+  commit_wait *w = malloc(sizeof(*w));
+  if (!w) {
+    http_write(response, 500, NULL, 0);
+    return;
+  }
+  *w = (commit_wait){http_defer(response), status, message};
+  if (kv_store_flush(store, false, on_committed, w) != 0) {
+    http_resume(w->d, 500, NULL, 0, NULL, 0);
+    free(w);
+  }
+}
+
+/** Handle POST /<key> {"value": string}, with x-kv-version from cp. */
+static void kv_post(http_response *response, const http_request *request, kv_store *store,
+                    bool sync) {
   uint64_t version;
   if (version_of(response, request, &version) != 0) {
     return;
@@ -183,7 +217,6 @@ static void kv_post_handler(http_response *response, const http_request *request
     return;
   }
 
-  // Parse the body using value.
   http_str body = http_req_body(request);
   json_doc *doc = json_parse(body.ptr, body.len);
   size_t value_len;
@@ -196,7 +229,6 @@ static void kv_post_handler(http_response *response, const http_request *request
     return;
   }
 
-  // Put the value.
   int put_value = kv_store_put(store, key, value, value_len, version);
   json_doc_free(doc);
   free(key);
@@ -206,14 +238,12 @@ static void kv_post_handler(http_response *response, const http_request *request
   } else if (put_value != 0) {
     code = 500;
   }
-  http_write(response, code, NULL, 0);
+  respond_change(response, store, sync, code, "");
 }
 
-/**
- * Route the HTTP DEL request to kv_store to then access the hashmap.
- */
-static void kv_del_handler(http_response *response, const http_request *request, void *arg) {
-  kv_store *store = arg;
+/** Handle DELETE /<key>, with x-kv-version from cp. */
+static void kv_del(http_response *response, const http_request *request, kv_store *store,
+                   bool sync) {
   uint64_t version;
   if (version_of(response, request, &version) != 0) {
     return;
@@ -224,13 +254,11 @@ static void kv_del_handler(http_response *response, const http_request *request,
     return;
   }
 
-  // Delete the value.
   int del_value = kv_store_del(store, key, version);
   free(key);
 
-  if (del_value == 0) { // key not found
-    static const char message[] = "Key not found.\n";
-    http_write(response, 404, message, sizeof(message) - 1);
+  if (del_value == 0) {
+    respond_change(response, store, sync, 404, "Key not found.\n");
     return;
   }
   int code = 200;
@@ -239,7 +267,36 @@ static void kv_del_handler(http_response *response, const http_request *request,
   } else if (del_value < 0) {
     code = 500;
   }
-  http_write(response, code, NULL, 0);
+  respond_change(response, store, sync, code, "");
+}
+
+static void kv_post_handler(http_response *response, const http_request *request, void *arg) {
+  kv_post(response, request, arg, false);
+}
+
+static void kv_post_sync_handler(http_response *response, const http_request *request, void *arg) {
+  kv_post(response, request, arg, true);
+}
+
+static void kv_del_handler(http_response *response, const http_request *request, void *arg) {
+  kv_del(response, request, arg, false);
+}
+
+static void kv_del_sync_handler(http_response *response, const http_request *request, void *arg) {
+  kv_del(response, request, arg, true);
+}
+
+static void on_flushed(void *ctx, int status) {
+  http_resume(ctx, status == 0 ? 200 : 500, NULL, 0, NULL, 0);
+}
+
+/** POST /_internal/flush: respond once every change queued before it is committed. */
+static void flush_handler(http_response *response, const http_request *request, void *arg) {
+  (void)request;
+  http_deferred *d = http_defer(response);
+  if (kv_store_flush(arg, true, on_flushed, d) != 0) {
+    http_resume(d, 500, NULL, 0, NULL, 0);
+  }
 }
 
 static void write_message(http_response *response, int status, const char *message) {
@@ -423,11 +480,14 @@ static void purge_handler(http_response *response, const http_request *request, 
   http_write(response, 200, NULL, 0);
 }
 
-void kv_register_routes(http_server *server, kv_store *store, logger *log) {
+void kv_register_routes(http_server *server, kv_store *store, logger *log, bool sync_ack) {
   http_use(server, log_requests, log);
   http_handle(server, HTTP_GET, "/{key}", kv_get_handler, store);
-  http_handle(server, HTTP_POST, "/{key}", kv_post_handler, store);
-  http_handle(server, HTTP_DELETE, "/{key}", kv_del_handler, store);
+  http_handle(server, HTTP_POST, "/{key}", sync_ack ? kv_post_sync_handler : kv_post_handler,
+              store);
+  http_handle(server, HTTP_DELETE, "/{key}", sync_ack ? kv_del_sync_handler : kv_del_handler,
+              store);
+  http_handle(server, HTTP_POST, "/_internal/flush", flush_handler, store);
   http_handle(server, HTTP_GET, "/_internal/health", health_handler, NULL);
   http_handle(server, HTTP_GET, "/_internal/dump", dump_handler, store);
   http_handle(server, HTTP_POST, "/_internal/batch", batch_handler, store);

@@ -80,9 +80,17 @@ typedef struct {
   int state;
 } start_gate;
 
+// The cross-thread queue of one event loop, for http_resume from other threads. Leaked with the
+// loop when connections outlive the shutdown grace period.
+typedef struct {
+  h2o_multithread_queue_t *queue;
+  h2o_multithread_receiver_t receiver;
+} resume_queue;
+
 typedef struct {
   http_server *server;
   int fd;
+  resume_queue *resumes;
   pthread_t tid;
   start_gate *gate;
   h2o_socket_t *listener;
@@ -91,6 +99,31 @@ typedef struct {
   h2o_context_t ctx;
   h2o_accept_ctx_t accept_ctx;
 } worker;
+
+struct http_deferred {
+  // NULL once H2O disposed the request (client gone). Loop thread only.
+  h2o_req_t *req;
+  h2o_context_t *ctx;
+  resume_queue *resumes;
+  // The request pool and the pending resume each hold one. Loop thread only.
+  int refs;
+};
+
+typedef struct {
+  h2o_multithread_message_t super;
+  http_deferred *d;
+  int status;
+  size_t header_count;
+  http_header *headers;
+  size_t len;
+  char data[];
+} resume_message;
+
+// The context of the event loop that runs on this thread, or NULL.
+static __thread h2o_context_t *current_ctx;
+static __thread resume_queue *current_resumes;
+
+static void on_resume_messages(h2o_multithread_receiver_t *receiver, h2o_linklist_t *messages);
 
 static const h2o_iovec_t method_names[] = {
     [HTTP_GET] = {H2O_STRLIT("GET")},     [HTTP_HEAD] = {H2O_STRLIT("HEAD")},
@@ -355,6 +388,11 @@ static void *run_worker(void *arg) {
   }
   h2o_evloop_t *loop = h2o_evloop_create();
   h2o_context_init(&w->ctx, loop, &w->server->config);
+  w->resumes = h2o_mem_alloc(sizeof(*w->resumes));
+  w->resumes->queue = h2o_multithread_create_queue(loop);
+  h2o_multithread_register_receiver(w->resumes->queue, &w->resumes->receiver, on_resume_messages);
+  current_ctx = &w->ctx;
+  current_resumes = w->resumes;
   w->accept_ctx.ctx = &w->ctx;
   w->accept_ctx.hosts = w->server->config.hosts;
 
@@ -387,7 +425,12 @@ static void *run_worker(void *arg) {
     h2o_socket_close(w->listener);
   }
   // A connection still open after the grace period keeps the loop: disposing would free under it.
+  current_ctx = NULL;
+  current_resumes = NULL;
   if (open_conns(&w->ctx) == 0) {
+    h2o_multithread_unregister_receiver(w->resumes->queue, &w->resumes->receiver);
+    h2o_multithread_destroy_queue(w->resumes->queue);
+    free(w->resumes);
     h2o_context_dispose(&w->ctx);
     h2o_evloop_destroy(loop);
     // Free the thread-local recycled buffers and pools of H2O; now 0 asks for a full clear.
@@ -686,6 +729,76 @@ static const char *reason_of(int status) {
     return "Service Unavailable";
   default:
     return "Unknown";
+  }
+}
+
+static void deferred_release(http_deferred *d) {
+  if (--d->refs == 0) {
+    free(d);
+  }
+}
+
+static void on_deferred_req_dispose(void *slot) {
+  http_deferred *d = *(http_deferred **)slot;
+  d->req = NULL;
+  deferred_release(d);
+}
+
+http_deferred *http_defer(http_response *w) {
+  h2o_req_t *req = (h2o_req_t *)w;
+  http_deferred *d = h2o_mem_alloc(sizeof(*d));
+  *d = (http_deferred){req, req->conn->ctx, current_resumes, 2};
+  http_deferred **slot =
+      (http_deferred **)h2o_mem_alloc_shared(&req->pool, sizeof(*slot), on_deferred_req_dispose);
+  *slot = d;
+  return d;
+}
+
+/** Send m's response if the client is still there, then free m. Loop thread only. */
+static void finish_resume(resume_message *m) {
+  http_deferred *d = m->d;
+  if (d->req != NULL) {
+    for (size_t i = 0; i != m->header_count; i++) {
+      http_set_header((http_response *)d->req, m->headers[i].name, m->headers[i].value);
+    }
+    http_write((http_response *)d->req, m->status, m->data, m->len);
+  }
+  deferred_release(d);
+  free(m);
+}
+
+static void on_resume_messages(h2o_multithread_receiver_t *receiver, h2o_linklist_t *messages) {
+  (void)receiver;
+  while (!h2o_linklist_is_empty(messages)) {
+    h2o_linklist_t *node = messages->next;
+    // The analyzer loses track of the list: each node is unlinked before finish_resume frees it.
+    h2o_linklist_unlink(node); // NOLINT(clang-analyzer-unix.Malloc)
+    finish_resume(H2O_STRUCT_FROM_MEMBER(resume_message, super.link, node));
+  }
+}
+
+void http_resume(http_deferred *d, int status, const http_header *headers, size_t header_count,
+                 const void *body, size_t len) {
+  size_t extra = len;
+  for (size_t i = 0; i != header_count; i++) {
+    extra += headers[i].value.len;
+  }
+  resume_message *m = h2o_mem_alloc(sizeof(*m) + extra + (header_count * sizeof(http_header)));
+  *m = (resume_message){{{NULL, NULL}}, d, status, header_count, NULL, len};
+  m->headers = (http_header *)(m->data + extra);
+  if (len != 0) {
+    memcpy(m->data, body, len);
+  }
+  char *p = m->data + len;
+  for (size_t i = 0; i != header_count; i++) {
+    memcpy(p, headers[i].value.ptr, headers[i].value.len);
+    m->headers[i] = (http_header){headers[i].name, {p, headers[i].value.len}};
+    p += headers[i].value.len;
+  }
+  if (current_ctx == d->ctx) {
+    finish_resume(m);
+  } else {
+    h2o_multithread_send_message(&d->resumes->receiver, &m->super);
   }
 }
 

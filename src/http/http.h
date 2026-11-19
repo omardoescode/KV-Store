@@ -125,4 +125,24 @@ int http_resp_status(const http_response *w);
 /** Send status and len bytes of body as the final response; call once per request. */
 void http_write(http_response *w, int status, const void *body, size_t len);
 
+typedef struct http_deferred http_deferred;
+
+typedef struct {
+  http_str name;
+  http_str value;
+} http_header;
+
+/**
+ * Take over the response of w, so the handler may return without http_write; respond later with
+ * http_resume, once. Middleware that runs after the handler sees status 0.
+ */
+http_deferred *http_defer(http_response *w);
+
+/**
+ * Send the response of d and free d; call once, from any thread. Copies headers (lowercase
+ * names) and body. If the client is gone, only frees d.
+ */
+void http_resume(http_deferred *d, int status, const http_header *headers, size_t header_count,
+                 const void *body, size_t len);
+
 #endif

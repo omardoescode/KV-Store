@@ -79,7 +79,7 @@ int main(void) {
   }
 
   http_server *server = http_server_new();
-  kv_register_routes(server, store, &log);
+  kv_register_routes(server, store, &log, cfg.sync_ack != 0);
 
   pthread_t signal_thread;
   int status = 1;
