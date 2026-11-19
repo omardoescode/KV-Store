@@ -100,6 +100,25 @@ for _ in 1 2 3; do
   expect 404 "$url/x%0A2026-01-01T00:00:00.000%20ERROR%20forged"
 done
 
+# Versioned writes from cp: last writer wins, a delete leaves a tombstone
+v="x-kv-version"
+expect 200 -X POST -H "$v: 10" -d '{"value":"a"}' "$url/ver"
+expect 200 -X POST -H "$v: 5" -d '{"value":"b"}' "$url/ver"
+expect_body '{"value":"a"}' "$url/ver"
+expect 200 -X DELETE -H "$v: 7" "$url/ver"
+expect_body '{"value":"a"}' "$url/ver"
+expect 200 -X POST -H "$v: 10" -d '{"value":"same"}' "$url/ver"
+expect_body '{"value":"same"}' "$url/ver"
+expect 200 -X DELETE -H "$v: 20" "$url/ver"
+expect 404 "$url/ver"
+expect 404 -X DELETE -H "$v: 21" "$url/ver"
+expect 200 -X POST -H "$v: 15" -d '{"value":"old"}' "$url/ver"
+expect 404 "$url/ver"
+expect 200 -X POST -H "$v: 30" -d '{"value":"c"}' "$url/ver"
+expect_body '{"value":"c"}' "$url/ver"
+expect 400 -X POST -H "$v: x1" -d '{"value":"c"}' "$url/ver"
+expect 400 -X DELETE -H "$v: -1" "$url/ver"
+
 kill -TERM "$pid"
 status=0
 wait "$pid" || status=$?

@@ -41,14 +41,14 @@ static void test_values_survive_restart(const char *db) {
 
   kv_store *store = kv_store_new(db, 10, test_log, 1000000);
   assert(store);
-  assert(kv_store_put(store, "multi", multiline, sizeof(multiline) - 1) == 0);
-  assert(kv_store_put(store, "bin", binary, sizeof(binary)) == 0);
-  assert(kv_store_put(store, "empty", NULL, 0) == 0);
-  assert(kv_store_put(store, "key with space", "v", 1) == 0);
-  assert(kv_store_put(store, "over", "old", 3) == 0);
-  assert(kv_store_put(store, "over", "new", 3) == 0);
-  assert(kv_store_put(store, "gone", "x", 1) == 0);
-  assert(kv_store_del(store, "gone") == 1);
+  assert(kv_store_put(store, "multi", multiline, sizeof(multiline) - 1, 0) == 0);
+  assert(kv_store_put(store, "bin", binary, sizeof(binary), 0) == 0);
+  assert(kv_store_put(store, "empty", NULL, 0, 0) == 0);
+  assert(kv_store_put(store, "key with space", "v", 1, 0) == 0);
+  assert(kv_store_put(store, "over", "old", 3, 0) == 0);
+  assert(kv_store_put(store, "over", "new", 3, 0) == 0);
+  assert(kv_store_put(store, "gone", "x", 1, 0) == 0);
+  assert(kv_store_del(store, "gone", 0) == 1);
   assert(kv_store_free(store) == 0);
 
   store = kv_store_new(db, 10, test_log, 1000000);
@@ -86,7 +86,7 @@ static void test_failed_commit_keeps_changes(const char *db) {
   assert(sqlite3_exec(locker, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
 
   atomic_store(&errors, 0);
-  assert(kv_store_put(store, "late", "kept\n", 5) == 0);
+  assert(kv_store_put(store, "late", "kept\n", 5, 0) == 0);
   struct timespec tick = {.tv_sec = 0, .tv_nsec = 10000000};
   for (int i = 0; i != 500 && atomic_load(&errors) < 2; i++) {
     nanosleep(&tick, NULL);
@@ -111,7 +111,7 @@ static void test_locked_shutdown_is_quick_and_fails(const char *db) {
   sqlite3 *locker = NULL;
   assert(sqlite3_open(db, &locker) == SQLITE_OK);
   assert(sqlite3_exec(locker, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
-  assert(kv_store_put(store, "lost", "x", 1) == 0);
+  assert(kv_store_put(store, "lost", "x", 1, 0) == 0);
 
   struct timespec start, end;
   clock_gettime(CLOCK_MONOTONIC, &start);
@@ -133,15 +133,17 @@ static void test_dropped_table_keeps_changes(const char *db) {
   assert(sqlite3_exec(other, "DROP TABLE kv", NULL, NULL, NULL) == SQLITE_OK);
 
   atomic_store(&errors, 0);
-  assert(kv_store_put(store, "a", "1", 1) == 0);
-  assert(kv_store_put(store, "b", "2", 1) == 0);
+  assert(kv_store_put(store, "a", "1", 1, 0) == 0);
+  assert(kv_store_put(store, "b", "2", 1, 0) == 0);
   struct timespec tick = {.tv_sec = 0, .tv_nsec = 10000000};
   for (int i = 0; i != 500 && atomic_load(&errors) < 2; i++) {
     nanosleep(&tick, NULL);
   }
   assert(atomic_load(&errors) >= 2);
 
-  assert(sqlite3_exec(other, "CREATE TABLE kv(key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID",
+  assert(sqlite3_exec(other,
+                      "CREATE TABLE kv(key TEXT PRIMARY KEY, value BLOB, version INTEGER NOT NULL"
+                      " DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID",
                       NULL, NULL, NULL) == SQLITE_OK);
   sqlite3_close(other);
   assert(kv_store_free(store) == 0);
@@ -157,10 +159,10 @@ static void test_dropped_table_keeps_changes(const char *db) {
 static void test_pending_limit(const char *db) {
   kv_store *store = kv_store_new(db, 3600000, test_log, 2);
   assert(store);
-  assert(kv_store_put(store, "p1", "1", 1) == 0);
-  assert(kv_store_put(store, "p2", "2", 1) == 0);
-  assert(kv_store_put(store, "p3", "3", 1) == -2);
-  assert(kv_store_del(store, "p1") == -2);
+  assert(kv_store_put(store, "p1", "1", 1, 0) == 0);
+  assert(kv_store_put(store, "p2", "2", 1, 0) == 0);
+  assert(kv_store_put(store, "p3", "3", 1, 0) == -2);
+  assert(kv_store_del(store, "p1", 0) == -2);
   void *got = NULL;
   size_t got_len = 0;
   assert(kv_store_get(store, "p3", &got, &got_len) == 0);
@@ -169,13 +171,13 @@ static void test_pending_limit(const char *db) {
 
   store = kv_store_new(db, 10, test_log, 2);
   assert(store);
-  assert(kv_store_put(store, "p3", "3", 1) == 0);
-  assert(kv_store_put(store, "p4", "4", 1) == 0);
+  assert(kv_store_put(store, "p3", "3", 1, 0) == 0);
+  assert(kv_store_put(store, "p4", "4", 1, 0) == 0);
   struct timespec tick = {.tv_sec = 0, .tv_nsec = 10000000};
   int rc = -2;
   for (int i = 0; i != 500 && rc == -2; i++) {
     nanosleep(&tick, NULL);
-    rc = kv_store_put(store, "p5", "5", 1);
+    rc = kv_store_put(store, "p5", "5", 1, 0);
   }
   assert(rc == 0);
   assert(kv_store_free(store) == 0);
@@ -196,9 +198,9 @@ static void test_failing_change_does_not_block_others(const char *db) {
   kv_store *store = kv_store_new(db, 3600000, test_log, 1000000);
   assert(store);
   atomic_store(&errors, 0);
-  assert(kv_store_put(store, "before", "1", 1) == 0);
-  assert(kv_store_put(store, "bad", "2", 1) == 0);
-  assert(kv_store_put(store, "after", "3", 1) == 0);
+  assert(kv_store_put(store, "before", "1", 1, 0) == 0);
+  assert(kv_store_put(store, "bad", "2", 1, 0) == 0);
+  assert(kv_store_put(store, "after", "3", 1, 0) == 0);
   assert(kv_store_free(store) == -1);
   assert(atomic_load(&errors) >= 1);
 

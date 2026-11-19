@@ -11,6 +11,10 @@ typedef struct {
   long max_pending;
   /** 0 means one event loop per usable CPU. */
   int threads;
+  /** 1: POST/DELETE respond only after the change is committed. */
+  int sync_ack;
+  /** Seconds a delete marker (tombstone) stays before the purge removes it. */
+  long tombstone_ttl_s;
 } kv_config;
 
 /**
