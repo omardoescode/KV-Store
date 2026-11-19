@@ -48,7 +48,7 @@ DEP := $(SRC:src/%.c=$(BUILD_DIR)/%.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-ring test-shutdown memcheck bench format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-ring test-sm test-shutdown memcheck bench format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET) $(if $(wildcard src/cp/main.c),$(CP_TARGET) $(CP_PROC_TARGET))
 
@@ -173,7 +173,17 @@ $(RING_TEST_BIN): $(RING_TEST_SRC) src/cp/ring.h $(SIPHASH_OBJ)
 test-ring: $(RING_TEST_BIN)
 	./$(RING_TEST_BIN)
 
-TEST_BINS := $(HM_TEST_BIN) $(RING_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
+SM_TEST_SRC := src/cp/sm.c tests/cp_sm_test.c
+SM_TEST_BIN := $(BUILD_DIR)/cp_sm_test
+
+$(SM_TEST_BIN): $(SM_TEST_SRC) src/cp/sm.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(SM_TEST_SRC) -o $@
+
+test-sm: $(SM_TEST_BIN)
+	./$(SM_TEST_BIN)
+
+TEST_BINS := $(HM_TEST_BIN) $(RING_TEST_BIN) $(SM_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
 
 test-shutdown: $(TARGET)
 	tests/shutdown_test.sh
