@@ -608,6 +608,31 @@ http_str http_req_param(const http_request *r, http_str name) {
   return (http_str){NULL, 0};
 }
 
+/** Find name in the query string, then percent-decode its value into the request pool. */
+http_str http_req_query(const http_request *r, http_str name) {
+  h2o_req_t *req = r->req;
+  if (req->query_at == SIZE_MAX) {
+    return (http_str){NULL, 0};
+  }
+  const char *p = req->path.base + req->query_at + 1;
+  const char *end = req->path.base + req->path.len;
+  while (p < end) {
+    const char *amp = memchr(p, '&', (size_t)(end - p));
+    const char *pair_end = amp != NULL ? amp : end;
+    const char *eq = memchr(p, '=', (size_t)(pair_end - p));
+    const char *name_end = eq != NULL ? eq : pair_end;
+    if (h2o_memis(p, (size_t)(name_end - p), name.ptr, name.len)) {
+      if (eq == NULL) {
+        return (http_str){"", 0};
+      }
+      h2o_iovec_t v = h2o_uri_unescape(&req->pool, eq + 1, (size_t)(pair_end - eq - 1));
+      return (http_str){v.base, v.len};
+    }
+    p = pair_end + 1;
+  }
+  return (http_str){NULL, 0};
+}
+
 /** Return the borrowed request body, valid only until the request handler returns. */
 http_str http_req_body(const http_request *r) {
   const h2o_req_t *req = r->req;

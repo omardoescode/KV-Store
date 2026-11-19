@@ -102,6 +102,11 @@ http_str http_req_path(const http_request *r);
  * The value is percent-decoded, borrowed, and valid until the handler returns.
  */
 http_str http_req_param(const http_request *r, http_str name);
+/**
+ * Return the percent-decoded value of the first query parameter name, "" for "name" with no '=',
+ * or {NULL, 0} if absent or its escape is invalid. Borrowed, valid until the handler returns.
+ */
+http_str http_req_query(const http_request *r, http_str name);
 /** Return the borrowed request body, valid until the handler returns. */
 http_str http_req_body(const http_request *r);
 /**
