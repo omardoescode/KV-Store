@@ -112,6 +112,9 @@ struct http_deferred {
 typedef struct {
   h2o_multithread_message_t super;
   http_deferred *d;
+  // Set for http_deferred_post: run fn(arg) instead of a response.
+  void (*fn)(void *arg);
+  void *arg;
   int status;
   size_t header_count;
   http_header *headers;
@@ -756,6 +759,11 @@ http_deferred *http_defer(http_response *w) {
 
 /** Send m's response if the client is still there, then free m. Loop thread only. */
 static void finish_resume(resume_message *m) {
+  if (m->fn != NULL) {
+    m->fn(m->arg);
+    free(m);
+    return;
+  }
   http_deferred *d = m->d;
   if (d->req != NULL) {
     for (size_t i = 0; i != m->header_count; i++) {
@@ -784,7 +792,7 @@ void http_resume(http_deferred *d, int status, const http_header *headers, size_
     extra += headers[i].value.len;
   }
   resume_message *m = h2o_mem_alloc(sizeof(*m) + extra + (header_count * sizeof(http_header)));
-  *m = (resume_message){{{NULL, NULL}}, d, status, header_count, NULL, len};
+  *m = (resume_message){{{NULL, NULL}}, d, NULL, NULL, status, header_count, NULL, len};
   m->headers = (http_header *)(m->data + extra);
   if (len != 0) {
     memcpy(m->data, body, len);
@@ -800,6 +808,20 @@ void http_resume(http_deferred *d, int status, const http_header *headers, size_
   } else {
     h2o_multithread_send_message(&d->resumes->receiver, &m->super);
   }
+}
+
+void http_deferred_post(http_deferred *d, void (*fn)(void *arg), void *arg) {
+  if (current_ctx == d->ctx) {
+    fn(arg);
+    return;
+  }
+  resume_message *m = h2o_mem_alloc(sizeof(*m));
+  *m = (resume_message){{{NULL, NULL}}, d, fn, arg, 0, 0, NULL, 0};
+  h2o_multithread_send_message(&d->resumes->receiver, &m->super);
+}
+
+struct st_h2o_evloop_t *http_current_loop(void) {
+  return current_ctx != NULL ? current_ctx->loop : NULL;
 }
 
 /** Return the status set by http_write; H2O starts each request with status 0. */
