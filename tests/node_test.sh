@@ -62,4 +62,27 @@ expect_body '{"items":[],"next":null}' "$url/_internal/dump"
 expect_body 'Key not found.' -X DELETE "$url/old"
 stop
 
+# Flush commits at once: the dump reads only committed rows
+rm -f "$KV_DB_PATH"*
+export KV_FLUSH_INTERVAL_MS=60000
+start
+curl -sf -X POST -d '{"value":"f"}' "$url/fl"
+expect_body '{"items":[],"next":null}' "$url/_internal/dump"
+curl -sf -X POST "$url/_internal/flush"
+expect_body '{"items":[{"key":"fl","value":"f","version":0,"deleted":false}],"next":null}' \
+  "$url/_internal/dump"
+stop
+
+# With sync ack, a write responds after its commit
+rm -f "$KV_DB_PATH"*
+export KV_FLUSH_INTERVAL_MS=300 KV_SYNC_ACK=1
+start
+curl -sf -X POST -d '{"value":"s"}' "$url/sa"
+expect_body '{"items":[{"key":"sa","value":"s","version":0,"deleted":false}],"next":null}' \
+  "$url/_internal/dump"
+curl -sf -X DELETE "$url/sa"
+expect_body '{"items":[{"key":"sa","value":"","version":0,"deleted":true}],"next":null}' \
+  "$url/_internal/dump"
+stop
+
 echo "node_test: OK"
