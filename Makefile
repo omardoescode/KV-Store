@@ -3,8 +3,8 @@ CC := gcc
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/app
 # cp with the Docker driver (production) and with the process driver (tests).
-CP_TARGET := $(BUILD_DIR)/cp
-CP_PROC_TARGET := $(BUILD_DIR)/cp-proc
+CP_TARGET := $(BUILD_DIR)/kv-cp
+CP_PROC_TARGET := $(BUILD_DIR)/kv-cp-proc
 COMPDB := $(BUILD_DIR)/compile_commands.json
 
 CFLAGS := -std=c17 \
@@ -17,7 +17,7 @@ CFLAGS := -std=c17 \
 H2O_DIR := third_party/h2o
 H2O_BUILD := $(BUILD_DIR)/h2o
 H2O_LIB := $(H2O_BUILD)/libh2o-evloop.a
-H2O_DEPS := klib picotls/include quicly/include yoml
+H2O_DEPS := klib picotls/include quicly/include yoml picohttpparser
 
 YYJSON_DIR := third_party/yyjson
 YYJSON_OBJ := $(BUILD_DIR)/yyjson.o
@@ -48,7 +48,7 @@ DEP := $(SRC:src/%.c=$(BUILD_DIR)/%.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-ring test-sm test-shutdown memcheck bench format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-ring test-sm test-cp test-shutdown memcheck bench format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET) $(if $(wildcard src/cp/main.c),$(CP_TARGET) $(CP_PROC_TARGET))
 
@@ -185,14 +185,18 @@ test-sm: $(SM_TEST_BIN)
 
 TEST_BINS := $(HM_TEST_BIN) $(RING_TEST_BIN) $(SM_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
 
+test-cp: $(TARGET) $(CP_PROC_TARGET)
+	python3 tests/cp_test.py
+
 test-shutdown: $(TARGET)
 	tests/shutdown_test.sh
 
-test: $(TEST_BINS) $(TARGET)
+test: $(TEST_BINS) $(TARGET) $(CP_PROC_TARGET)
 	@set -e; for t in $(TEST_BINS); do ./$$t; done
 	tests/http_test.sh
 	tests/node_test.sh
 	tests/shutdown_test.sh
+	python3 tests/cp_test.py
 
 memcheck: $(TARGET)
 	tests/memcheck.sh

@@ -145,4 +145,15 @@ http_deferred *http_defer(http_response *w);
 void http_resume(http_deferred *d, int status, const http_header *headers, size_t header_count,
                  const void *body, size_t len);
 
+/**
+ * Run fn(arg) on the event loop thread of d's request: at once if called there, else queued.
+ * Runs also if the client is gone. d stays valid until http_resume.
+ */
+void http_deferred_post(http_deferred *d, void (*fn)(void *arg), void *arg);
+
+struct st_h2o_evloop_t;
+
+/** Return the H2O event loop of the calling event loop thread, or NULL on other threads. */
+struct st_h2o_evloop_t *http_current_loop(void);
+
 #endif

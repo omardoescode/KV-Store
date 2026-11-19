@@ -35,35 +35,6 @@ static void log_requests(http_response *response, const http_request *request, h
            http_resp_status(response));
 }
 
-/** Return whether s holds well-formed UTF-8: no overlong form, surrogate, or code point > U+10FFFF.
- */
-static bool valid_utf8(const unsigned char *s, size_t len) {
-  static const uint32_t min_code[] = {0, 0x80, 0x800, 0x10000};
-  size_t i = 0;
-  while (i != len) {
-    uint32_t c = s[i];
-    if ((c >= 0x80 && c < 0xc0) || c >= 0xf8) {
-      return false;
-    }
-    size_t extra = (size_t)(c >= 0xc0) + (c >= 0xe0) + (c >= 0xf0);
-    if (len - i <= extra) {
-      return false;
-    }
-    uint32_t code = extra ? c & (0x3fU >> extra) : c;
-    for (size_t k = 1; k <= extra; k++) {
-      if ((s[i + k] & 0xc0U) != 0x80) {
-        return false;
-      }
-      code = code << 6U | (s[i + k] & 0x3fU);
-    }
-    if (code < min_code[extra] || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
-      return false;
-    }
-    i += extra + 1;
-  }
-  return true;
-}
-
 /**
  * Return a NUL-terminated copy of the "{key}" path parameter and set *len to its length.
  * On error, respond 400 (key holds a NUL byte or is not UTF-8) or 500 and return NULL.
@@ -77,7 +48,7 @@ static char *key_copy(http_response *response, const http_request *request, size
     return NULL;
   }
   // The key column is SQLite TEXT, which must be UTF-8.
-  if (!valid_utf8((const unsigned char *)key.ptr, key.len)) {
+  if (!json_valid_utf8((const unsigned char *)key.ptr, key.len)) {
     static const char message[] = "key must be UTF-8\n";
     http_write(response, 400, message, sizeof(message) - 1);
     return NULL;
@@ -308,7 +279,7 @@ static bool valid_key(const char *key, size_t len) {
   if (len == 0 || memchr(key, '\0', len) != NULL) {
     return false;
   }
-  return valid_utf8((const unsigned char *)key, len);
+  return json_valid_utf8((const unsigned char *)key, len);
 }
 
 static void health_handler(http_response *response, const http_request *request, void *arg) {

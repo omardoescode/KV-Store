@@ -29,11 +29,9 @@ typedef enum {
   NODE_EVENT_COUNT,
 } node_event;
 
-enum {
-  NODE_ACT_SPAWN = 1U << 0U,
-  NODE_ACT_RESPAWN = 1U << 1U,
-  NODE_ACT_REPAIR = 1U << 2U,
-};
+#define NODE_ACT_SPAWN 0x1U
+#define NODE_ACT_RESPAWN 0x2U
+#define NODE_ACT_REPAIR 0x4U
 
 typedef struct {
   node_state state;
@@ -94,14 +92,12 @@ typedef enum {
   MIG_EVENT_COUNT,
 } mig_event;
 
-enum {
-  MIG_ACT_SPAWN_TARGET = 1U << 0U,
-  MIG_ACT_COPY = 1U << 1U,
-  MIG_ACT_FLIP = 1U << 2U,
-  MIG_ACT_DRAIN = 1U << 3U,
-  MIG_ACT_PURGE = 1U << 4U,
-  MIG_ACT_ABORT = 1U << 5U,
-};
+#define MIG_ACT_SPAWN_TARGET 0x1U
+#define MIG_ACT_COPY 0x2U
+#define MIG_ACT_FLIP 0x4U
+#define MIG_ACT_DRAIN 0x8U
+#define MIG_ACT_PURGE 0x10U
+#define MIG_ACT_ABORT 0x20U
 
 typedef struct {
   mig_phase next;

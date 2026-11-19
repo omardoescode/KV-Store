@@ -90,4 +90,8 @@ bool json_push(json_node *arr, json_node *val);
  */
 char *json_to_bytes(const json_node *root, size_t *len);
 
+/** Return whether len bytes of s are well-formed UTF-8: no overlong form, surrogate, or code
+ * point > U+10FFFF. */
+bool json_valid_utf8(const unsigned char *s, size_t len);
+
 #endif
