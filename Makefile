@@ -2,6 +2,9 @@ CC := gcc
 
 BUILD_DIR := build
 TARGET := $(BUILD_DIR)/app
+# cp with the Docker driver (production) and with the process driver (tests).
+CP_TARGET := $(BUILD_DIR)/cp
+CP_PROC_TARGET := $(BUILD_DIR)/cp-proc
 COMPDB := $(BUILD_DIR)/compile_commands.json
 
 CFLAGS := -std=c17 \
@@ -37,14 +40,17 @@ LDLIBS := $(YYJSON_OBJ) $(SIPHASH_OBJ) $(H2O_LIB) \
           $(SQLITE_LIBS) -lm
 
 SRC := $(wildcard src/*.c src/*/*.c)
-OBJ := $(SRC:src/%.c=$(BUILD_DIR)/%.o)
-DEP := $(OBJ:.o=.d)
+NODE_SRC := $(filter-out src/cp/%,$(SRC))
+CP_SRC := $(filter-out src/main.c src/kv/% src/cp/driver_%,$(SRC))
+OBJ := $(NODE_SRC:src/%.c=$(BUILD_DIR)/%.o)
+CP_OBJ := $(CP_SRC:src/%.c=$(BUILD_DIR)/%.o)
+DEP := $(SRC:src/%.c=$(BUILD_DIR)/%.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-shutdown memcheck bench format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-ring test-shutdown memcheck bench format format-check lint lint-fix init
 
-all: $(COMPDB) $(TARGET)
+all: $(COMPDB) $(TARGET) $(if $(wildcard src/cp/main.c),$(CP_TARGET) $(CP_PROC_TARGET))
 
 $(COMPDB): Makefile $(SRC)
 	@mkdir -p $(dir $@)
@@ -61,6 +67,12 @@ $(COMPDB): Makefile $(SRC)
 
 $(TARGET): $(OBJ) $(YYJSON_OBJ) $(SIPHASH_OBJ) $(H2O_LIB)
 	$(CC) $(CFLAGS) $(OBJ) $(LDLIBS) -o $@
+
+$(CP_TARGET): $(CP_OBJ) $(BUILD_DIR)/cp/driver_docker.o $(YYJSON_OBJ) $(SIPHASH_OBJ) $(H2O_LIB)
+	$(CC) $(CFLAGS) $(CP_OBJ) $(BUILD_DIR)/cp/driver_docker.o $(LDLIBS) -o $@
+
+$(CP_PROC_TARGET): $(CP_OBJ) $(BUILD_DIR)/cp/driver_process.o $(YYJSON_OBJ) $(SIPHASH_OBJ) $(H2O_LIB)
+	$(CC) $(CFLAGS) $(CP_OBJ) $(BUILD_DIR)/cp/driver_process.o $(LDLIBS) -o $@
 
 $(H2O_DIR)/CMakeLists.txt:
 	git submodule update --init --depth 1 $(H2O_DIR)
@@ -88,6 +100,7 @@ $(H2O_LIB): $(H2O_DIR)/CMakeLists.txt
 $(BUILD_DIR)/http/%.o: CPPFLAGS += $(H2O_CPPFLAGS)
 $(BUILD_DIR)/json/%.o: CPPFLAGS += $(YYJSON_CPPFLAGS)
 $(BUILD_DIR)/hashmap/%.o: CPPFLAGS += $(SIPHASH_CPPFLAGS)
+$(BUILD_DIR)/cp/%.o: CPPFLAGS += $(SIPHASH_CPPFLAGS) $(H2O_CPPFLAGS) $(YYJSON_CPPFLAGS)
 
 $(BUILD_DIR)/%.o: src/%.c | $(H2O_DIR)/CMakeLists.txt $(YYJSON_DIR)/src/yyjson.c $(SIPHASH_DIR)/siphash.c
 	@mkdir -p $(dir $@)
@@ -150,7 +163,17 @@ $(KV_STORE_TEST_BIN): $(KV_STORE_TEST_SRC) src/kv/kv_store.h src/hashmap/hashmap
 test-kv-store: $(KV_STORE_TEST_BIN)
 	./$(KV_STORE_TEST_BIN)
 
-TEST_BINS := $(HM_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
+RING_TEST_SRC := src/cp/ring.c tests/ring_test.c
+RING_TEST_BIN := $(BUILD_DIR)/ring_test
+
+$(RING_TEST_BIN): $(RING_TEST_SRC) src/cp/ring.h $(SIPHASH_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS) $(RING_TEST_SRC) $(SIPHASH_OBJ) -o $@
+
+test-ring: $(RING_TEST_BIN)
+	./$(RING_TEST_BIN)
+
+TEST_BINS := $(HM_TEST_BIN) $(RING_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
 
 test-shutdown: $(TARGET)
 	tests/shutdown_test.sh
@@ -197,7 +220,7 @@ init:
 	git config core.hooksPath .githooks
 
 clean:
-	rm -f $(TARGET) $(OBJ) $(DEP) $(YYJSON_OBJ) $(SIPHASH_OBJ) $(TEST_BINS)
+	rm -f $(TARGET) $(CP_TARGET) $(CP_PROC_TARGET) $(OBJ) $(CP_OBJ) $(DEP) $(YYJSON_OBJ) $(SIPHASH_OBJ) $(TEST_BINS)
 
 distclean:
 	rm -rf $(BUILD_DIR)

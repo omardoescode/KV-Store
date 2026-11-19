@@ -82,3 +82,96 @@ int config_load(kv_config *cfg) {
   cfg->threads = (int)threads;
   return 0;
 }
+
+/** Parse name like env_long, then check it is in [min, max]. */
+static int env_range(const char *name, long *out, long min, long max) {
+  if (env_long(name, out) != 0) {
+    return -1;
+  }
+  if (*out < min || *out > max) {
+    (void)fprintf(stderr, "config: %s=%ld must be in [%ld, %ld]\n", name, *out, min, max);
+    return -1;
+  }
+  return 0;
+}
+
+int cp_config_load(cp_config *cfg) {
+  static const char *const required[] = {"KV_CP_LISTEN_ADDR", "KV_CP_DB_PATH", "KV_CP_LOG_PATH"};
+  const char *values[3];
+  int missing = 0;
+  for (size_t i = 0; i != 3; i++) {
+    values[i] = getenv(required[i]);
+    if (!values[i] || !*values[i]) {
+      (void)fprintf(stderr, "config: %s is required but not set\n", required[i]);
+      missing = 1;
+    }
+  }
+  if (missing) {
+    return -1;
+  }
+  cfg->listen_addr = values[0];
+  cfg->db_path = values[1];
+  cfg->log_path = values[2];
+  if (!strchr(cfg->listen_addr, ':')) {
+    (void)fprintf(stderr, "config: KV_CP_LISTEN_ADDR=\"%s\" must be host:port\n", cfg->listen_addr);
+    return -1;
+  }
+  long threads = 0;
+  long initial = 1;
+  long max_nodes = 3;
+  long replicas = 1;
+  long vnodes = 128;
+  long scale_rps = 0;
+  long window_s = 10;
+  long cooldown_s = 60;
+  long probe_ms = 1000;
+  long probe_fails = 3;
+  long forward_ms = 2000;
+  long base_port = 7900;
+  if (env_range("KV_CP_THREADS", &threads, 0, 1024) != 0 ||
+      env_range("KV_CP_INITIAL_NODES", &initial, 1, 1024) != 0 ||
+      env_range("KV_CP_MAX_NODES", &max_nodes, 1, 1024) != 0) {
+    return -1;
+  }
+  long min_nodes = initial;
+  if (env_range("KV_CP_MIN_NODES", &min_nodes, 1, 1024) != 0 ||
+      env_range("KV_CP_REPLICAS", &replicas, 1, 1024) != 0 ||
+      env_range("KV_CP_VNODES", &vnodes, 1, 4096) != 0 ||
+      env_range("KV_CP_SCALE_RPS", &scale_rps, 0, 1000000000) != 0 ||
+      env_range("KV_CP_SCALE_WINDOW_S", &window_s, 1, 3600) != 0 ||
+      env_range("KV_CP_SCALE_COOLDOWN_S", &cooldown_s, 0, 86400) != 0 ||
+      env_range("KV_CP_PROBE_INTERVAL_MS", &probe_ms, 10, 600000) != 0 ||
+      env_range("KV_CP_PROBE_FAILS", &probe_fails, 1, 1000) != 0 ||
+      env_range("KV_CP_FORWARD_TIMEOUT_MS", &forward_ms, 1, 600000) != 0 ||
+      env_range("KV_CP_NODE_BASE_PORT", &base_port, 1, 65535) != 0) {
+    return -1;
+  }
+  if (replicas > initial) {
+    (void)fprintf(stderr, "config: KV_CP_REPLICAS=%ld must be <= KV_CP_INITIAL_NODES=%ld\n",
+                  replicas, initial);
+    return -1;
+  }
+  if (initial > max_nodes || min_nodes > max_nodes) {
+    (void)fprintf(stderr,
+                  "config: KV_CP_INITIAL_NODES=%ld and KV_CP_MIN_NODES=%ld must be <= "
+                  "KV_CP_MAX_NODES=%ld\n",
+                  initial, min_nodes, max_nodes);
+    return -1;
+  }
+  cfg->threads = (int)threads;
+  cfg->initial_nodes = (int)initial;
+  cfg->min_nodes = (int)min_nodes;
+  cfg->max_nodes = (int)max_nodes;
+  cfg->replicas = (int)replicas;
+  cfg->vnodes = (int)vnodes;
+  cfg->scale_rps = scale_rps;
+  cfg->scale_window_s = (int)window_s;
+  cfg->scale_cooldown_s = (int)cooldown_s;
+  cfg->probe_interval_ms = (int)probe_ms;
+  cfg->probe_fails = (int)probe_fails;
+  cfg->forward_timeout_ms = (int)forward_ms;
+  const char *image = getenv("KV_CP_NODE_IMAGE");
+  cfg->node_image = image && *image ? image : "kv-storage";
+  cfg->node_base_port = (int)base_port;
+  return 0;
+}
