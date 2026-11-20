@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /**
  * A consistent-hash ring of node ids with vnodes points per node. A point of node id sits at
@@ -35,6 +36,21 @@ size_t ring_prefs(const ring *r, const char *key, size_t key_len, int *out);
 
 /** Return whether id is in the preference list of key. */
 int ring_has(const ring *r, int id, const char *key, size_t key_len);
+
+/** Ring positions in (start, end], wrapping past the top; start == end is the whole ring. */
+typedef struct {
+  uint64_t start;
+  uint64_t end;
+} ring_range;
+
+/**
+ * Write to *out the ranges where the preference list in from and to differ, *n of them. *out is
+ * malloc'd (NULL if none) and the caller frees it. Returns 0, or -1 on allocation failure.
+ */
+int ring_diff(const ring *from, const ring *to, ring_range **out, size_t *n);
+
+/** Return whether key falls in one of the n ranges. */
+bool ring_ranges_have(const ring_range *ranges, size_t n, const char *key, size_t key_len);
 
 /**
  * Which rows move when the ring changes from `from` to `to`. readers is indexed by node id: the
