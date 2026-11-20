@@ -218,7 +218,7 @@ static int purge_phase(controller *ctl, int target) {
   xfer x = {v.prev, v.ring, NULL};
   int rc = 0;
   for (int src = 1; src <= CLUSTER_MAX_NODES && rc == 0 && v.prev; src++) {
-    if (src != target && v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state)) {
+    if (src != target && v.nodes[src].exists && node_takes_writes(v.nodes[src].sm.state)) {
       rc = move_rows(ctl, &x, src, v.nodes[src].addr, 0, NULL);
     }
   }
