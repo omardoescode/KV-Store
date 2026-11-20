@@ -241,13 +241,57 @@ class FailureTest(ClusterTest):
         c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2).start()
         for i in range(20):
             c.put(f'k{i}', 'before')
-        c.kill_node(2)
-        for i in range(20):
+        c.kill_node(1)
+        self.assertEqual(c.put('k0', 'after'), 200)
+        self.assertEqual(c.get('k0'), 'after')
+        for i in range(1, 20):
             self.assertEqual(c.get(f'k{i}'), 'before')
-        # Writes fail only until cp marks the node DEAD (probe window), then go on.
-        wait_for(lambda: c.put('probe', 'x') == 200, 10, 'writes after a replica died')
-        for i in range(20):
             self.assertEqual(c.put(f'k{i}', 'after'), 200)
+            self.assertEqual(c.get(f'k{i}'), 'after')
+
+    def test_stopped_replica_misses_a_write_and_is_repaired_before_reads(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2, KV_CP_FORWARD_TIMEOUT_MS=300,
+                         KV_CP_PROBE_FAILS=100).start()
+        self.assertEqual(c.put('k', 'old'), 200)
+        reads, stop = [], threading.Event()
+
+        def reader():
+            while not stop.is_set():
+                start = time.monotonic()
+                reads.append((start, c.get('k')))
+
+        t = threading.Thread(target=reader, daemon=True)
+        pid = c.node_pids()[1]
+        os.kill(pid, signal.SIGSTOP)
+        try:
+            t.start()
+            self.assertEqual(c.put('k', 'new'), 200)
+            acked = time.monotonic()
+            self.assertEqual(c.nodes()[1]['state'], 'REPAIRING')
+            time.sleep(0.5)
+        finally:
+            os.kill(pid, signal.SIGCONT)
+        wait_for(lambda: c.nodes()[1]['state'] == 'ACTIVE', 20, 'node 1 ACTIVE')
+        stop.set()
+        t.join(10)
+        self.assertEqual(c.dump(1)['k'][0], 'new')
+        after = [v for start, v in reads if start > acked]
+        self.assertTrue(after)
+        self.assertEqual(set(after), {'new'})
+
+    def test_write_fails_when_every_replica_is_stopped(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2, KV_CP_FORWARD_TIMEOUT_MS=300,
+                         KV_CP_PROBE_FAILS=100).start()
+        pids = c.node_pids()
+        for pid in pids.values():
+            os.kill(pid, signal.SIGSTOP)
+        try:
+            status, _, headers = c.req('POST', '/k', {'value': 'v'})
+        finally:
+            for pid in pids.values():
+                os.kill(pid, signal.SIGCONT)
+        self.assertEqual(status, 503)
+        self.assertEqual(headers.get('retry-after'), '1')
 
     def test_dead_node_is_respawned_and_repaired_before_reads(self):
         c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2).start()

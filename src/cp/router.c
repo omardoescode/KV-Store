@@ -26,11 +26,13 @@ typedef struct op {
   // Read: index of the target tried now. Write: forwards not answered yet.
   size_t at;
   size_t pending;
-  // Write: status and body of the first replica, and whether a replica failed.
+  // Write: status and body of the first counting ack, the counting acks, and the replicas that
+  // failed (bit i: targets[i]).
   int status;
   char *resp;
   size_t resp_len;
-  bool failed;
+  size_t acks;
+  uint32_t missed;
   size_t key_len;
   char *key;
   char *path;
@@ -175,15 +177,13 @@ static void on_written(void *ctx, const fwd_result *res) {
   free(w);
   bool join_target = i >= o->p.replicas;
   bool ok = (bool)(res->status >= 0 && res->status < 500);
-  if (!ok) {
-    if (res->status < 0 || join_target) {
-      cluster_forward_failed(o->c, o->p.targets[i].id, join_target);
-    }
-    if (!join_target) {
-      o->failed = true;
-    }
+  if (!ok && (res->status < 0 || join_target)) {
+    cluster_forward_failed(o->c, o->p.targets[i].id, join_target);
   }
-  if (i == 0 && ok) {
+  if (!ok && !join_target) {
+    o->missed |= 1U << i;
+  }
+  if (ok && !join_target && o->p.targets[i].counts && o->acks++ == 0) {
     o->status = res->status;
     o->resp = res->len ? malloc(res->len) : NULL;
     if (o->resp) {
@@ -194,7 +194,13 @@ static void on_written(void *ctx, const fwd_result *res) {
   if (--o->pending != 0) {
     return;
   }
-  if (o->failed) {
+  // Mark before the ack: a replica without the write must not answer a read after it.
+  for (size_t t = 0; o->acks != 0 && t != o->p.replicas; t++) {
+    if ((o->missed & (1U << t)) != 0) {
+      cluster_missed_write(o->c, o->p.targets[t].id);
+    }
+  }
+  if (o->acks < o->p.acks) {
     finish(o, 503, NULL, 0);
   } else {
     finish(o, o->status, o->resp, o->resp_len);

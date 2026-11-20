@@ -6,7 +6,7 @@
 #include <string.h>
 
 // Owners with vnodes 128 and 1 replica: {1,2,3} -> {1,2,3,4} moves k2 from 1 and k7 from 2 to
-// node 4; k0 stays on 2.
+// node 4; k0 stays on 2. With 2 replicas k0 is on 2 and 3; with 3 replicas every key is on all.
 
 static void quiet(void *ctx, log_level level, const char *fmt, ...) {
   (void)ctx;
@@ -20,17 +20,29 @@ static const cp_config cfg = {
     .vnodes = 128,
     .probe_fails = 2,
 };
+static const cp_config cfg_rf2 = {
+    .max_nodes = 4,
+    .replicas = 2,
+    .vnodes = 128,
+    .probe_fails = 2,
+};
+static const cp_config cfg_rf3 = {
+    .max_nodes = 4,
+    .replicas = 3,
+    .vnodes = 128,
+    .probe_fails = 2,
+};
 
 typedef struct {
   cp_store *store;
   cluster *c;
 } fixture;
 
-static fixture three_nodes(void) {
+static fixture three_nodes_with(const cp_config *config) {
   fixture f;
   f.store = cp_store_open(":memory:");
   assert(f.store);
-  f.c = cluster_new(&cfg, f.store, (logger){quiet, NULL});
+  f.c = cluster_new(config, f.store, (logger){quiet, NULL});
   assert(f.c);
   for (int id = 1; id <= 3; id++) {
     char addr[16];
@@ -40,6 +52,8 @@ static fixture three_nodes(void) {
   cluster_reserve_versions(f.c);
   return f;
 }
+
+static fixture three_nodes(void) { return three_nodes_with(&cfg); }
 
 static void done(fixture f) {
   cluster_free(f.c);
@@ -155,6 +169,80 @@ static void test_versions_after_restart_are_above_the_stored_mark(void) {
   printf("  test_versions_after_restart_are_above_the_stored_mark OK\n");
 }
 
+static size_t write_acks(const cp_config *config) {
+  fixture f = three_nodes_with(config);
+  plan p;
+  assert(cluster_plan_write(f.c, "k0", 2, &p) == 0);
+  cluster_done(f.c, p.epoch);
+  done(f);
+  return p.acks;
+}
+
+static void test_write_needs_acks_of_all_replicas_but_one(void) {
+  assert(write_acks(&cfg) == 1);
+  assert(write_acks(&cfg_rf2) == 1);
+  assert(write_acks(&cfg_rf3) == 2);
+  printf("  test_write_needs_acks_of_all_replicas_but_one OK\n");
+}
+
+static void test_missed_write_stops_reads_but_not_writes(void) {
+  fixture f = three_nodes_with(&cfg_rf2);
+  cluster_missed_write(f.c, 2);
+  int got[3];
+  assert(ids(f.c, "k0", false, got) == 1 && got[0] == 3);
+  plan p;
+  assert(cluster_plan_write(f.c, "k0", 2, &p) == 0);
+  cluster_done(f.c, p.epoch);
+  assert(p.count == 2 && p.replicas == 2 && p.acks == 1);
+  for (size_t i = 0; i != p.count; i++) {
+    assert(p.targets[i].id == 2 || p.targets[i].id == 3);
+    assert(p.targets[i].counts == (p.targets[i].id == 3));
+  }
+  cluster_view *v = malloc(sizeof(*v));
+  assert(v);
+  cluster_snapshot(f.c, v);
+  assert(v->nodes[2].sm.state == NODE_REPAIRING);
+  free(v);
+  done(f);
+  printf("  test_missed_write_stops_reads_but_not_writes OK\n");
+}
+
+static void test_write_fails_without_enough_replicas_to_ack(void) {
+  fixture f = three_nodes_with(&cfg_rf3);
+  assert(cluster_put_node(f.c, 2, "n2", (node_sm){NODE_DEAD, 0, true}, true) == 0);
+  assert(write_version(f.c, "k0") != 0);
+  cluster_missed_write(f.c, 3);
+  assert(write_version(f.c, "k0") == 0);
+  done(f);
+  f = three_nodes_with(&cfg_rf2);
+  cluster_missed_write(f.c, 2);
+  assert(cluster_put_node(f.c, 3, "n3", (node_sm){NODE_DEAD, 0, true}, true) == 0);
+  assert(write_version(f.c, "k0") == 0);
+  done(f);
+  printf("  test_write_fails_without_enough_replicas_to_ack OK\n");
+}
+
+static void test_missed_write_is_stored_at_the_next_node_event(void) {
+  fixture f = three_nodes_with(&cfg_rf2);
+  cluster_missed_write(f.c, 2);
+  (void)cluster_node_event(f.c, 2, NODE_EV_PROBE_OK);
+  stored_node nodes[3];
+  assert(cp_store_nodes(f.store, nodes, 3) == 3);
+  assert(nodes[1].id == 2 && nodes[1].sm.state == NODE_REPAIRING);
+  done(f);
+  printf("  test_missed_write_is_stored_at_the_next_node_event OK\n");
+}
+
+static void test_take_missed_write_reports_each_miss_once(void) {
+  fixture f = three_nodes_with(&cfg_rf2);
+  assert(!cluster_take_missed_write(f.c, 2));
+  cluster_missed_write(f.c, 2);
+  assert(cluster_take_missed_write(f.c, 2));
+  assert(!cluster_take_missed_write(f.c, 2));
+  done(f);
+  printf("  test_take_missed_write_reports_each_miss_once OK\n");
+}
+
 int main(void) {
   printf("cluster tests:\n");
   test_copy_writes_moving_keys_to_target();
@@ -162,6 +250,11 @@ int main(void) {
   test_abort_restores_old_plans();
   test_add_request_stops_at_max_nodes();
   test_versions_after_restart_are_above_the_stored_mark();
+  test_write_needs_acks_of_all_replicas_but_one();
+  test_missed_write_stops_reads_but_not_writes();
+  test_write_fails_without_enough_replicas_to_ack();
+  test_missed_write_is_stored_at_the_next_node_event();
+  test_take_missed_write_reports_each_miss_once();
   printf("all cluster tests passed\n");
   return 0;
 }

@@ -12,6 +12,10 @@ typedef struct {
   cluster_node n;
   /** The router saw a forward to this node fail since the controller last looked. */
   bool forward_error;
+  /** A write was acked without this node since the controller last looked. */
+  bool missed_write;
+  /** n.sm changed in memory and is not in the store yet. */
+  bool unsaved;
 } cnode;
 
 struct cluster {
@@ -102,6 +106,7 @@ static void add_target(plan *p, int id, const cluster_node *n) {
   plan_target *t = &p->targets[p->count++];
   t->id = id;
   memcpy(t->addr, n->addr, sizeof(t->addr));
+  t->counts = node_serves_reads(n->sm.state);
 }
 
 static void take_ticket(cluster *c, plan *p) {
@@ -115,17 +120,23 @@ int cluster_plan_write(cluster *c, const char *key, size_t key_len, plan *out) {
   pthread_mutex_lock(&c->mu);
   out->version = next_version(c);
   size_t n = c->ring && out->version ? ring_prefs(c->ring, key, key_len, prefs) : 0;
+  out->acks = n > 1 ? n - 1 : 1;
+  size_t counting = 0;
   for (size_t i = 0; i != n; i++) {
-    cluster_node *node = &c->nodes[prefs[i]].n;
+    const cluster_node *node = &c->nodes[prefs[i]].n;
     if (node_takes_writes(node->sm.state)) {
       add_target(out, prefs[i], node);
-      node->requests++;
+      counting += out->targets[out->count - 1].counts ? 1 : 0;
     }
   }
   out->replicas = out->count;
-  if (out->count == 0) {
+  if (counting < out->acks) {
+    out->count = 0;
     pthread_mutex_unlock(&c->mu);
     return -1;
+  }
+  for (size_t i = 0; i != out->count; i++) {
+    c->nodes[out->targets[i].id].n.requests++;
   }
   if (c->double_write && c->next && ring_has(c->next, c->target, key, key_len)) {
     add_target(out, c->target, &c->nodes[c->target].n);
@@ -169,6 +180,21 @@ void cluster_forward_failed(cluster *c, int id, bool join_target) {
     c->double_write_failed = true;
   }
   pthread_mutex_unlock(&c->mu);
+}
+
+void cluster_missed_write(cluster *c, int id) {
+  pthread_mutex_lock(&c->mu);
+  cnode *node = &c->nodes[id];
+  node_sm before = node->n.sm;
+  node->n.sm = node_step(before, NODE_EV_MISSED_WRITE, c->cfg->probe_fails).next;
+  node->missed_write = true;
+  bool changed = node->n.sm.state != before.state;
+  node->unsaved = (bool)(node->unsaved || changed);
+  pthread_mutex_unlock(&c->mu);
+  if (changed) {
+    LOGF(c, LOG_WARN, "node %d: %s -> REPAIRING, missed a write", id,
+         node_state_name(before.state));
+  }
 }
 
 static int node_count(const cluster *c) {
@@ -264,41 +290,43 @@ int cluster_drop_node(cluster *c, int id) {
   return replace_node(c, id, &(cluster_node){.exists = false});
 }
 
-/** Write sm (and addr, if not NULL) of node id, then apply them. */
-static void update_node(cluster *c, int id, node_sm sm, const char *addr) {
-  pthread_mutex_lock(&c->mu);
-  cluster_node n = c->nodes[id].n;
-  pthread_mutex_unlock(&c->mu);
-  n.sm = sm;
-  if (addr) {
-    memset(n.addr, 0, sizeof(n.addr));
-    strncpy(n.addr, addr, sizeof(n.addr) - 1);
-  }
-  (void)save_node(c, id, &n);
-  pthread_mutex_lock(&c->mu);
-  c->nodes[id].n.sm = sm;
-  memcpy(c->nodes[id].n.addr, n.addr, sizeof(n.addr));
-  pthread_mutex_unlock(&c->mu);
-}
-
+/**
+ * Apply ev to node id and write the new state (and addr, if not NULL) to the store first. A missed
+ * write the router marks meanwhile makes the step start again from the marked state.
+ */
 static unsigned step_node(cluster *c, int id, node_event ev, const char *addr) {
-  pthread_mutex_lock(&c->mu);
-  node_sm before = c->nodes[id].n.sm;
-  pthread_mutex_unlock(&c->mu);
-  node_result r = node_step(before, ev, c->cfg->probe_fails);
-  bool changed = (bool)(r.next.state != before.state || r.next.rejoin != before.rejoin);
-  if (changed) {
-    LOGF(c, LOG_INFO, "node %d: %s -> %s", id, node_state_name(before.state),
-         node_state_name(r.next.state));
-  }
-  if (changed || addr) {
-    update_node(c, id, r.next, addr);
-  } else {
+  for (;;) {
     pthread_mutex_lock(&c->mu);
-    c->nodes[id].n.sm = r.next;
+    cluster_node n = c->nodes[id].n;
+    bool unsaved = c->nodes[id].unsaved;
     pthread_mutex_unlock(&c->mu);
+    node_sm before = n.sm;
+    node_result r = node_step(before, ev, c->cfg->probe_fails);
+    bool changed = (bool)(r.next.state != before.state || r.next.rejoin != before.rejoin);
+    n.sm = r.next;
+    if (addr) {
+      memset(n.addr, 0, sizeof(n.addr));
+      strncpy(n.addr, addr, sizeof(n.addr) - 1);
+    }
+    if (changed || addr || unsaved) {
+      (void)save_node(c, id, &n);
+    }
+    pthread_mutex_lock(&c->mu);
+    cnode *cur = &c->nodes[id];
+    if (cur->n.sm.state != before.state) {
+      pthread_mutex_unlock(&c->mu);
+      continue;
+    }
+    cur->n.sm = r.next;
+    memcpy(cur->n.addr, n.addr, sizeof(n.addr));
+    cur->unsaved = false;
+    pthread_mutex_unlock(&c->mu);
+    if (changed) {
+      LOGF(c, LOG_INFO, "node %d: %s -> %s", id, node_state_name(before.state),
+           node_state_name(r.next.state));
+    }
+    return r.actions;
   }
-  return r.actions;
 }
 
 unsigned cluster_node_event(cluster *c, int id, node_event ev) {
@@ -307,6 +335,14 @@ unsigned cluster_node_event(cluster *c, int id, node_event ev) {
 
 unsigned cluster_spawned(cluster *c, int id, const char *addr) {
   return step_node(c, id, NODE_EV_SPAWN_OK, addr);
+}
+
+bool cluster_take_missed_write(cluster *c, int id) {
+  pthread_mutex_lock(&c->mu);
+  bool missed = c->nodes[id].missed_write;
+  c->nodes[id].missed_write = false;
+  pthread_mutex_unlock(&c->mu);
+  return missed;
 }
 
 bool cluster_take_forward_error(cluster *c, int id) {
