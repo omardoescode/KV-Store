@@ -2,31 +2,6 @@
 
 #include <string.h>
 
-typedef struct {
-  const cluster_view *v;
-  int source;
-  int target;
-} join_arg;
-
-static bool copy_filter(controller *ctl, const char *key, size_t key_len, void *arg) {
-  (void)ctl;
-  join_arg *a = arg;
-  return (bool)(a->v->next && ring_has(a->v->next, a->target, key, key_len) &&
-                ctl_first_reader(a->v, a->v->ring, key, key_len, a->target) == a->source);
-}
-
-typedef struct {
-  const cluster_view *v;
-  int source;
-} purge_arg;
-
-static bool purge_filter(controller *ctl, const char *key, size_t key_len, void *arg) {
-  (void)ctl;
-  purge_arg *a = arg;
-  return (bool)(a->v->prev && ring_has(a->v->prev, a->source, key, key_len) &&
-                !ring_has(a->v->ring, a->source, key, key_len));
-}
-
 static void abort_join(controller *ctl, int target, bool retry) {
   (void)cluster_set_phase(ctl->c, MIG_ABORT, target);
   driver_fault_point("ABORT", target);
@@ -57,12 +32,16 @@ static int copy_phase(controller *ctl, int target) {
   ctl_set_purge_all(ctl, true);
   static cluster_view v;
   cluster_snapshot(ctl->c, &v);
+  static bool readers[CLUSTER_MAX_NODES + 1];
+  for (int src = 1; src <= CLUSTER_MAX_NODES; src++) {
+    readers[src] = (bool)(v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state));
+  }
+  xfer x = {v.ring, v.next, readers};
   const char *addr = v.nodes[target].addr;
   int rc = 0;
   for (int src = 1; src <= CLUSTER_MAX_NODES && rc == 0; src++) {
-    if (v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state)) {
-      join_arg a = {&v, src, target};
-      rc = ctl_copy_rows(ctl, v.nodes[src].addr, copy_filter, &a, addr, "/_internal/batch");
+    if (readers[src]) {
+      rc = ctl_move_rows(ctl, &x, src, v.nodes[src].addr, target, addr);
     }
   }
   if (rc == 0 && (cluster_copy_lost_write(ctl->c) || !ctl_probe_health(ctl, addr))) {
@@ -83,12 +62,11 @@ static int purge_phase(controller *ctl, int target) {
   driver_fault_point("PURGE", target);
   static cluster_view v;
   cluster_snapshot(ctl->c, &v);
+  xfer x = {v.prev, v.ring, NULL};
   int rc = 0;
-  for (int src = 1; src <= CLUSTER_MAX_NODES && rc == 0; src++) {
+  for (int src = 1; src <= CLUSTER_MAX_NODES && rc == 0 && v.prev; src++) {
     if (src != target && v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state)) {
-      purge_arg a = {&v, src};
-      rc = ctl_copy_rows(ctl, v.nodes[src].addr, purge_filter, &a, v.nodes[src].addr,
-                         "/_internal/delete-batch");
+      rc = ctl_move_rows(ctl, &x, src, v.nodes[src].addr, 0, NULL);
     }
   }
   if (rc == 0) {

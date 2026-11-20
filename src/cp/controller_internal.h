@@ -48,18 +48,12 @@ int ctl_resolve(const char *in, char out[DRIVER_ADDR_LEN]);
 /** Pause or resume the tombstone purge on every live node. */
 void ctl_set_purge_all(controller *ctl, bool paused);
 
-/** Decides per dumped row whether it goes to the destination. */
-typedef bool (*row_filter)(controller *ctl, const char *key, size_t key_len, void *arg);
-
 /**
- * Flush src, dump all its rows, and send those filter keeps to dst at path (/_internal/batch
- * sends rows, /_internal/delete-batch sends keys). Returns 0 or -1.
+ * Move the rows of node (at addr) that x moves: with target, flush node and send to dst the rows
+ * that node is the source of; with target 0, delete from node the keys it drops. Returns 0 or -1.
  */
-int ctl_copy_rows(controller *ctl, const char *src, row_filter filter, void *arg, const char *dst,
-                  const char *path);
-/** Return the first node of key's preference list in r that serves reads in v and is not skip. */
-int ctl_first_reader(const cluster_view *v, const ring *r, const char *key, size_t key_len,
-                     int skip);
+int ctl_move_rows(controller *ctl, const xfer *x, int node, const char *addr, int target,
+                  const char *dst);
 /** Copy the keys of node id from the replicas that serve reads. Returns 0 or -1. */
 int ctl_repair(controller *ctl, int id);
 /** Spawn node id again with its data and repair it. */
