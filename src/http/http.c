@@ -267,6 +267,23 @@ void http_server_free(http_server *s) {
   free(s);
 }
 
+size_t http_percent_encode(char *out, const char *s, size_t len) {
+  static const char hex[] = "0123456789ABCDEF";
+  size_t n = 0;
+  for (size_t i = 0; i != len; i++) {
+    unsigned char ch = (unsigned char)s[i];
+    if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
+        ch == '-' || ch == '.' || ch == '_' || ch == '~') {
+      out[n++] = (char)ch;
+    } else {
+      out[n++] = '%';
+      out[n++] = hex[ch >> 4U];
+      out[n++] = hex[ch & 0xfU];
+    }
+  }
+  return n;
+}
+
 void http_on_worker_exit(http_server *s, void (*fn)(void)) { s->worker_exit = fn; }
 
 void http_server_stop(http_server *s) {

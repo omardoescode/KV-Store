@@ -227,30 +227,6 @@ static void run_op(void *arg) {
   }
 }
 
-/** Percent-encode key into "/<key>", escaping all but unreserved characters. */
-static char *encode_path(const char *key, size_t len) {
-  static const char hex[] = "0123456789ABCDEF";
-  char *out = malloc((len * 3) + 2);
-  if (!out) {
-    return NULL;
-  }
-  size_t n = 0;
-  out[n++] = '/';
-  for (size_t i = 0; i != len; i++) {
-    unsigned char ch = (unsigned char)key[i];
-    if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
-        ch == '-' || ch == '.' || ch == '_' || ch == '~') {
-      out[n++] = (char)ch;
-    } else {
-      out[n++] = '%';
-      out[n++] = hex[ch >> 4U];
-      out[n++] = hex[ch & 0xfU];
-    }
-  }
-  out[n] = '\0';
-  return out;
-}
-
 typedef struct {
   cluster *c;
   logger *log;
@@ -273,7 +249,11 @@ static void handle_key(http_response *w, const http_request *r, op_kind kind) {
   }
   http_str body = kind == OP_POST ? http_req_body(r) : (http_str){NULL, 0};
   op *o = calloc(1, sizeof(*o) + body.len + key.len + 1);
-  char *path = encode_path(key.ptr, key.len);
+  char *path = malloc((key.len * 3) + 2);
+  if (path) {
+    path[0] = '/';
+    path[1 + http_percent_encode(path + 1, key.ptr, key.len)] = '\0';
+  }
   if (!o || !path) {
     free(o);
     free(path);

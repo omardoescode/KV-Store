@@ -329,7 +329,7 @@ def check_invariants(test, c, expected, deleted, replicas):
         rows = [dumps[n][key] for n in ring if key in dumps[n]]
         live = {r for r in rows}
         test.assertEqual(len(live), 1, f'replicas of {key} differ: {rows}')
-        test.assertLessEqual(len(rows), replicas, f'{key} on {len(rows)} nodes')
+        test.assertEqual(len(rows), min(replicas, len(ring)), f'{key} on {len(rows)} nodes')
 
 
 class JoinTest(ClusterTest):
@@ -406,6 +406,111 @@ class RestartTest(ClusterTest):
         self.assertEqual(c.dump(1)['k1'], c.dump(2)['k1'])
 
 
+INF = float('inf')
+
+
+def linearizable(ops):
+    """Whether one key's history fits a register that starts empty (Wing-Gong search).
+
+    ops: (start, end, kind, arg, result). kind 'put' (arg value), 'del', or 'get' (result value or
+    None). A del result is True when the key existed. An op with no answer has end INF: it may or
+    may not have taken effect, so the search may also leave it out.
+    """
+    ops = [o for o in ops if not (o[2] == 'get' and o[1] == INF)]
+    n = len(ops)
+    need = sum(1 << i for i, o in enumerate(ops) if o[1] != INF)
+    seen = set()
+
+    def step(done, value):
+        if done & need == need:
+            return True
+        if (done, value) in seen:
+            return False
+        seen.add((done, value))
+        first_end = min(ops[i][1] for i in range(n) if not done >> i & 1)
+        for i in range(n):
+            if done >> i & 1 or ops[i][0] > first_end:
+                continue
+            start, end, kind, arg, result = ops[i]
+            if kind == 'put':
+                nxt = arg
+            elif kind == 'del':
+                if end != INF and result != (value is not None):
+                    continue
+                nxt = None
+            else:
+                if result != value:
+                    continue
+                nxt = value
+            if step(done | 1 << i, nxt):
+                return True
+        return False
+
+    return step(0, None)
+
+
+class History(threading.Thread):
+    """One client: puts, deletes and gets on a few keys; records each op with its time span."""
+
+    def __init__(self, c, name, keys, ops, log):
+        super().__init__(daemon=True)
+        self.c, self.name, self.keys, self.n, self.log = c, name, keys, ops, log
+
+    def run(self):
+        for i in range(self.n):
+            key = self.keys[i % len(self.keys)]
+            kind = ('put', 'get', 'del', 'get', 'put')[i % 5]
+            arg = f'{self.name}-{i}' if kind == 'put' else None
+            start = time.monotonic()
+            try:
+                if kind == 'put':
+                    status = self.c.put(key, arg)
+                    result = None
+                elif kind == 'del':
+                    status = self.c.delete(key)
+                    result = status == 200
+                    status = 200 if status == 404 else status
+                else:
+                    got = self.c.get(key)
+                    status = 200 if got == 404 or isinstance(got, str) else got
+                    result = got if isinstance(got, str) else None
+            except OSError:
+                status = 0
+            end = time.monotonic() if status == 200 else INF
+            self.log.append((key, (start, end, kind, arg, result)))
+            time.sleep(0.03)
+
+
+class LinearizabilityTest(ClusterTest):
+    def test_checker_rejects_a_stale_read(self):
+        self.assertTrue(linearizable([(0, 1, 'put', 'a', None), (2, 3, 'get', None, 'a')]))
+        self.assertFalse(linearizable([(0, 1, 'put', 'a', None), (2, 3, 'get', None, None)]))
+        self.assertFalse(linearizable([(0, 1, 'put', 'a', None), (2, 3, 'put', 'b', None),
+                                       (4, 5, 'get', None, 'a')]))
+        self.assertTrue(linearizable([(0, INF, 'put', 'a', None), (2, 3, 'get', None, None)]))
+        self.assertFalse(linearizable([(0, 1, 'del', None, True)]))
+
+    def test_ops_on_one_key_are_linearizable_during_join_and_failure(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2, KV_CP_MAX_NODES=3).start()
+        log = []
+        clients = [History(c, f'c{n}', ['x', 'y', 'z'], 90, log) for n in range(4)]
+        for t in clients:
+            t.start()
+        c.req('POST', '/_cp/nodes')
+        time.sleep(0.5)
+        c.kill_node(1)
+        for t in clients:
+            t.join(120)
+        self.assertEqual(c.migration()['phase'], 'IDLE')
+        self.assertEqual(len(c.nodes()), 3)
+        by_key = {}
+        for key, op in log:
+            by_key.setdefault(key, []).append(op)
+        self.assertGreater(sum(1 for _, o in log if o[1] != INF), 100)
+        for key, ops in by_key.items():
+            self.assertTrue(linearizable(ops), f'history of {key} is not linearizable: {ops}')
+
+
 def wait_settled(c, count):
     """Wait for count ACTIVE ring nodes and no migration. The probes see a killed node only after
     a while, so every node must also answer its own health check, twice in a row."""
@@ -420,8 +525,29 @@ def wait_settled(c, count):
 class FaultMatrixTest(ClusterTest):
     """A join with a node or cp killed when a phase starts keeps every invariant."""
 
+    def run_repair_case(self, replicas, phase, victim):
+        c = self.cluster(KV_CP_INITIAL_NODES=replicas, KV_CP_REPLICAS=replicas, KV_SYNC_ACK=1)
+        c.start(KV_CP_FAULT=f'{phase}:{victim}')
+        for i in range(100):
+            c.put(f'k{i}', f'v{i}')
+        c.delete('k5')
+        w = Writer(c)
+        w.start()
+        c.kill_node(1)
+        if victim == 'cp':
+            c.proc.wait(30)
+            del c.env['KV_CP_FAULT']
+            c.start(wait_nodes=0)
+        else:
+            wait_for(lambda: c.nodes()[1]['state'] != 'ACTIVE', 10, 'node 1 seen dead')
+        wait_settled(c, replicas)
+        w.stop()
+        expected = {f'k{i}': (None if i == 5 else f'v{i}') for i in range(100)}
+        expected.update(w.acked)
+        check_invariants(self, c, expected, [], replicas)
+
     def run_case(self, replicas, phase, victim):
-        initial = 2 if replicas == 2 else 1
+        initial = replicas
         c = self.cluster(KV_CP_INITIAL_NODES=initial, KV_CP_REPLICAS=replicas,
                          KV_CP_MAX_NODES=initial + 1, KV_SYNC_ACK=1).start()
         for i in range(150):
@@ -448,13 +574,12 @@ class FaultMatrixTest(ClusterTest):
 
 
 def add_matrix():
-    for replicas in (1, 2):
+    for replicas in (1, 2, 3):
         for phase in ('SPAWN', 'COPY', 'FLIP', 'DRAIN', 'PURGE'):
-            for victim in ('target', '1', 'cp') + (('2',) if replicas == 2 else ()):
+            for victim in ('target', 'cp') + tuple(str(n) for n in range(1, replicas + 1)):
                 def case(self, r=replicas, p=phase, v=victim):
                     self.run_case(r, p, v)
                 setattr(FaultMatrixTest, f'test_rf{replicas}_{phase.lower()}_{victim}', case)
-    for replicas in (1, 2):
         for phase in ('RESPAWN', 'REPAIR'):
             for victim in ('target', 'cp'):
                 def case(self, r=replicas, p=phase, v=victim):
@@ -462,30 +587,6 @@ def add_matrix():
                 setattr(FaultMatrixTest, f'test_repair_rf{replicas}_{phase.lower()}_{victim}', case)
 
 
-def run_repair_case(self, replicas, phase, victim):
-    initial = 2 if replicas == 2 else 1
-    c = self.cluster(KV_CP_INITIAL_NODES=initial, KV_CP_REPLICAS=replicas, KV_SYNC_ACK=1)
-    c.start(KV_CP_FAULT=f'{phase}:{victim}')
-    for i in range(100):
-        c.put(f'k{i}', f'v{i}')
-    c.delete('k5')
-    w = Writer(c)
-    w.start()
-    c.kill_node(1)
-    if victim == 'cp':
-        c.proc.wait(30)
-        del c.env['KV_CP_FAULT']
-        c.start(wait_nodes=0)
-    else:
-        wait_for(lambda: c.nodes()[1]['state'] != 'ACTIVE', 10, 'node 1 seen dead')
-    wait_settled(c, initial)
-    w.stop()
-    expected = {f'k{i}': (None if i == 5 else f'v{i}') for i in range(100)}
-    expected.update(w.acked)
-    check_invariants(self, c, expected, [], replicas)
-
-
-FaultMatrixTest.run_repair_case = run_repair_case
 add_matrix()
 
 
