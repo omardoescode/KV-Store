@@ -24,12 +24,9 @@ static logger dlog;
 int driver_init(const cp_config *cfg, logger log) {
   dlog = log;
   base_port = cfg->node_base_port;
-  node_bin = getenv("KV_CP_NODE_BIN");
-  node_dir = getenv("KV_CP_NODE_DIR");
-  if (!node_bin || !*node_bin) {
-    node_bin = "./build/app";
-  }
-  if (!node_dir || !*node_dir) {
+  node_bin = cfg->node_bin;
+  node_dir = cfg->node_dir;
+  if (!node_dir) {
     (void)fprintf(stderr, "driver: KV_CP_NODE_DIR is required by the process driver\n");
     return -1;
   }

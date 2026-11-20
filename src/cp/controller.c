@@ -2,8 +2,6 @@
 
 #include "cp/node_client.h"
 
-enum { SPAWN_WAIT_MS = 15000 };
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,11 +11,6 @@ int64_t ctl_mono_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return ((int64_t)ts.tv_sec * 1000) + (ts.tv_nsec / 1000000);
-}
-
-void ctl_sleep_ms(int ms) {
-  struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
-  nanosleep(&ts, NULL);
 }
 
 controller *controller_new(cluster *c, cp_store *store, const cp_config *cfg, logger log) {
@@ -34,20 +27,6 @@ controller *controller_new(cluster *c, cp_store *store, const cp_config *cfg, lo
   ctl->last_scale_ms = ctl_mono_ms() - ((int64_t)ctl->cfg->scale_cooldown_s * 1000);
   ctl->window_start_ms = ctl_mono_ms();
   return ctl;
-}
-
-int ctl_spawn_ready(int id, char addr[DRIVER_ADDR_LEN]) {
-  if (driver_spawn(id, addr) != 0) {
-    return -1;
-  }
-  int64_t deadline = ctl_mono_ms() + SPAWN_WAIT_MS;
-  while (ctl_mono_ms() < deadline) {
-    if (node_health(addr)) {
-      return 0;
-    }
-    ctl_sleep_ms(50);
-  }
-  return -1;
 }
 
 static bool probed(node_state s) {
