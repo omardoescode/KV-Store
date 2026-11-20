@@ -61,11 +61,22 @@ Run the benchmark against `127.0.0.1:7890` for the live cluster. Incrementally c
 
 ## Results table
 
-Live measurements should be entered below after running the benchmark. The table deliberately
-contains no fabricated measurements:
+Process driver, one host (Intel i7-8850H, 12 threads), `KV_CP_REPLICAS=1`, 95% reads, 10,000 keys,
+100-byte values, 20 s per rate (`bench/cluster_profile.py --mix 95`). cp, nodes and k6 share the
+host, and another build and test job ran during the later runs, so the 3-node, 8,000 RPS row is
+likely CPU-bound on the host, not on the cluster.
 
 | Nodes | Target RPS | Achieved RPS | p50 ms | p95 ms | p99 ms | Error % |
 |---:|---:|---:|---:|---:|---:|---:|
-| 1 | Not measured | - | - | - | - | - |
-| 2 | Not measured | - | - | - | - | - |
-| 3 | Not measured | - | - | - | - | - |
+| 1 | 2000 | 1965 | 0.41 | 0.73 | 0.88 | 0 |
+| 1 | 4000 | 3920 | 0.24 | 0.62 | 1.23 | 0 |
+| 1 | 8000 | 7837 | 0.14 | 0.46 | 2.47 | 0 |
+| 2 | 2000 | 1963 | 0.40 | 0.72 | 0.86 | 0 |
+| 2 | 4000 | 3917 | 0.24 | 0.60 | 0.91 | 0 |
+| 2 | 8000 | 7829 | 0.13 | 0.30 | 2.77 | 0 |
+| 3 | 2000 | 1958 | 0.38 | 0.71 | 0.86 | 0 |
+| 3 | 4000 | 3917 | 0.24 | 0.64 | 1.74 | 0 |
+| 3 | 8000 | 5985 | 0.18 | 20.35 | 90.52 | 0 |
+
+Up to 8,000 RPS, one node is not the limit, so more nodes do not raise throughput on one host. A
+multi-host run is needed to measure scale-out.
