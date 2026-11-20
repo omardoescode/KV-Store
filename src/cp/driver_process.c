@@ -99,6 +99,8 @@ int driver_spawn(int id, char addr[DRIVER_ADDR_LEN]) {
       dup2(devnull, STDIN_FILENO);
       dup2(devnull, STDOUT_FILENO);
     }
+    // cp's listen sockets are inherited: a node that outlives cp would hold cp's port open.
+    (void)close_range(3, ~0U, 0);
     execl(node_bin, node_bin, (char *)NULL);
     _exit(127);
   }

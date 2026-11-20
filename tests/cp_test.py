@@ -66,6 +66,7 @@ class Cluster:
         }
         self.env.update({k: str(v) for k, v in env.items()})
         self.proc = None
+        self.writers = []
 
     def start(self, wait_nodes=None, **env):
         self.env.update({k: str(v) for k, v in env.items()})
@@ -88,13 +89,20 @@ class Cluster:
                 self.proc.wait()
 
     def close(self):
+        for w in self.writers:
+            w.stop_flag = True
+        for w in self.writers:
+            w.join(15)
         self.stop(signal.SIGKILL)
         for pid in self.node_pids().values():
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        shutil.rmtree(self.dir, ignore_errors=True)
+        if os.environ.get('KV_TEST_KEEP'):
+            print('kept', self.dir, file=sys.stderr)
+        else:
+            shutil.rmtree(self.dir, ignore_errors=True)
 
     def stderr(self):
         try:
@@ -195,6 +203,287 @@ class PublicApiTest(ClusterTest):
         self.assertEqual(ring['vnodes'], 8)
         self.assertEqual(ring['replicas'], 2)
         self.assertEqual(c.migration(), {'phase': 'IDLE', 'target': None})
+
+
+class ReplicationTest(ClusterTest):
+    def test_write_goes_to_every_replica_with_one_version(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=3, KV_CP_REPLICAS=2).start()
+        for i in range(50):
+            self.assertEqual(c.put(f'k{i}', f'v{i}'), 200)
+        self.assertEqual(c.delete('k0'), 200)
+        dumps = {n: c.dump(n) for n in (1, 2, 3)}
+        for i in range(50):
+            holders = [n for n in dumps if f'k{i}' in dumps[n]]
+            self.assertEqual(len(holders), 2, f'k{i} on {holders}')
+            rows = {dumps[n][f'k{i}'] for n in holders}
+            self.assertEqual(len(rows), 1, f'replicas of k{i} differ: {rows}')
+        self.assertTrue(all(dumps[n]['k0'][2] for n in dumps if 'k0' in dumps[n]))
+
+    def test_cp_refuses_bad_config(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=1, KV_CP_REPLICAS=2)
+        c.start(wait_nodes=0)
+        self.assertEqual(c.proc.wait(10), 1)
+        self.assertIn('KV_CP_REPLICAS', c.stderr())
+
+    def test_cp_exits_after_repeated_spawn_failures(self):
+        c = self.cluster(KV_CP_NODE_BIN='/bin/false')
+        c.start(wait_nodes=0)
+        self.assertNotEqual(c.proc.wait(120), 0)
+        self.assertIn('failed 5 times', c.stderr())
+
+
+class FailureTest(ClusterTest):
+    def test_reads_and_writes_go_on_when_a_replica_dies(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2).start()
+        for i in range(20):
+            c.put(f'k{i}', 'before')
+        c.kill_node(2)
+        for i in range(20):
+            self.assertEqual(c.get(f'k{i}'), 'before')
+        # Writes fail only until cp marks the node DEAD (probe window), then go on.
+        wait_for(lambda: c.put('probe', 'x') == 200, 10, 'writes after a replica died')
+        for i in range(20):
+            self.assertEqual(c.put(f'k{i}', 'after'), 200)
+
+    def test_dead_node_is_respawned_and_repaired_before_reads(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2).start()
+        for i in range(100):
+            c.put(f'k{i}', 'old')
+        c.delete('k99')
+        c.kill_node(1)
+        wait_for(lambda: c.nodes()[1]['state'] != 'ACTIVE', 10, 'node 1 not ACTIVE')
+        # Changes made while node 1 is down must reach it through the repair.
+        wait_for(lambda: c.put('k0', 'new') == 200, 10, 'writes with node 1 down')
+        for i in range(1, 50):
+            self.assertEqual(c.put(f'k{i}', 'new'), 200)
+        self.assertEqual(c.delete('k98'), 200)
+        c.wait_active(2, 30)
+        d1, d2 = c.dump(1), c.dump(2)
+        self.assertEqual(d1, d2)
+        self.assertEqual(d1['k0'][0], 'new')
+        self.assertEqual(d1['k60'][0], 'old')
+        self.assertTrue(d1['k98'][2] and d1['k99'][2])
+
+    def test_rf1_respawned_node_keeps_its_volume(self):
+        c = self.cluster(KV_SYNC_ACK=1).start()
+        for i in range(20):
+            c.put(f'k{i}', f'v{i}')
+        c.kill_node(1)
+        wait_for(lambda: c.nodes()[1]['state'] != 'ACTIVE', 10, 'node 1 not ACTIVE')
+        c.wait_active(1, 30)
+        for i in range(20):
+            self.assertEqual(c.get(f'k{i}'), f'v{i}')
+
+
+class Writer(threading.Thread):
+    """Writes and deletes keys w<i> through cp until stopped; keeps the last acked op per key."""
+
+    def __init__(self, c, keys=40):
+        super().__init__(daemon=True)
+        self.c, self.keys, self.stop_flag, self.acked, self.errors = c, keys, False, {}, 0
+        c.writers.append(self)
+
+    def run(self):
+        i = 0
+        while not self.stop_flag:
+            key = f'w{i % self.keys}'
+            try:
+                if i % 7 == 3:
+                    status, value = self.c.delete(key), None
+                    ok = status in (200, 404)
+                else:
+                    value = f'v{i}'
+                    ok = self.c.put(key, value) == 200
+            except OSError:
+                ok = False
+            if ok:
+                self.acked[key] = value
+            else:
+                # Not acked: the key may hold the old or the new value.
+                self.acked.pop(key, None)
+                self.errors += 1
+            i += 1
+
+    def stop(self):
+        self.stop_flag = True
+        self.join(10)
+
+
+def check_invariants(test, c, expected, deleted, replicas):
+    """Acked writes readable, deleted keys gone, and every key's replicas hold one row."""
+    for key, value in expected.items():
+        got = c.get(key)
+        if value is None:
+            test.assertEqual(got, 404, f'deleted key {key} came back')
+        else:
+            test.assertEqual(got, value, f'acked write of {key} lost')
+    for key in deleted:
+        test.assertEqual(c.get(key), 404, f'deleted key {key} came back')
+    ring = json.loads(c.req('GET', '/_cp/ring')[1])['nodes']
+    dumps = {n: c.dump(n) for n in ring}
+    keys = set().union(*[set(d) for d in dumps.values()])
+    for key in keys:
+        rows = [dumps[n][key] for n in ring if key in dumps[n]]
+        live = {r for r in rows}
+        test.assertEqual(len(live), 1, f'replicas of {key} differ: {rows}')
+        test.assertLessEqual(len(rows), replicas, f'{key} on {len(rows)} nodes')
+
+
+class JoinTest(ClusterTest):
+    def test_manual_join_moves_keys_without_losing_writes(self):
+        c = self.cluster(KV_CP_MAX_NODES=2).start()
+        for i in range(300):
+            c.put(f'k{i}', f'v{i}')
+        for i in range(0, 300, 10):
+            c.delete(f'k{i}')
+        w = Writer(c)
+        w.start()
+        time.sleep(0.3)
+        status, body, _ = c.req('POST', '/_cp/nodes')
+        self.assertEqual((status, body), (202, '{"queued":true}'))
+        c.wait_active(2, 30)
+        time.sleep(0.3)
+        w.stop()
+        self.assertEqual(w.errors, 0)
+        expected = {f'k{i}': (None if i % 10 == 0 else f'v{i}') for i in range(300)}
+        expected.update(w.acked)
+        check_invariants(self, c, expected, [], 1)
+        live = lambda d: {k for k, r in d.items() if not r[2]}
+        on2 = live(c.dump(2))
+        on1 = live(c.dump(1))
+        self.assertFalse(on1 & on2, 'a key is on both nodes with RF=1')
+        self.assertTrue(60 < len({k for k in on2 if k.startswith('k')}) < 210, len(on2))
+        self.assertEqual(c.req('POST', '/_cp/nodes')[0], 409)
+
+    def test_join_with_replicas(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2, KV_CP_MAX_NODES=3).start()
+        for i in range(200):
+            c.put(f'k{i}', f'v{i}')
+        w = Writer(c)
+        w.start()
+        c.req('POST', '/_cp/nodes')
+        c.wait_active(3, 30)
+        w.stop()
+        self.assertEqual(w.errors, 0)
+        expected = {f'k{i}': f'v{i}' for i in range(200)}
+        expected.update(w.acked)
+        check_invariants(self, c, expected, [], 2)
+        self.assertGreater(len(c.dump(3)), 50)
+
+    def test_autoscale_adds_a_node_under_load(self):
+        c = self.cluster(KV_CP_MAX_NODES=2, KV_CP_SCALE_RPS=20, KV_CP_SCALE_WINDOW_S=1).start()
+        deadline = time.monotonic() + 15
+        while len(c.nodes()) < 2 and time.monotonic() < deadline:
+            c.put('hot', 'x')
+        c.wait_active(2, 30)
+        self.assertEqual(c.get('hot'), 'x')
+
+    def test_no_autoscale_without_threshold(self):
+        c = self.cluster(KV_CP_MAX_NODES=2, KV_CP_SCALE_WINDOW_S=1).start()
+        end = time.monotonic() + 2.5
+        while time.monotonic() < end:
+            c.put('hot', 'x')
+        self.assertEqual(len(c.nodes()), 1)
+
+
+class RestartTest(ClusterTest):
+    def test_cp_restart_keeps_nodes_and_data(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2).start()
+        for i in range(50):
+            c.put(f'k{i}', f'v{i}')
+        pids = c.node_pids()
+        c.stop(signal.SIGKILL)
+        c.start()
+        self.assertEqual(c.node_pids(), pids)
+        for i in range(50):
+            self.assertEqual(c.get(f'k{i}'), f'v{i}')
+        # Versions stay above those before the restart, so new writes win.
+        self.assertEqual(c.put('k1', 'newer'), 200)
+        self.assertEqual(c.get('k1'), 'newer')
+        self.assertEqual(c.dump(1)['k1'], c.dump(2)['k1'])
+
+
+def wait_settled(c, count):
+    """Wait for count ACTIVE ring nodes and no migration. The probes see a killed node only after
+    a while, so every node must also answer its own health check, twice in a row."""
+    def settled():
+        nodes = c.nodes()
+        return c.migration()['phase'] == 'IDLE' and len(nodes) == count and all(
+            n['state'] == 'ACTIVE' and n['in_ring'] and c.node_req(i, 'GET', '/_internal/health')[0] == 200
+            for i, n in nodes.items())
+    wait_for(lambda: settled() and (time.sleep(0.5) or settled()), 90, 'cluster settles')
+
+
+class FaultMatrixTest(ClusterTest):
+    """A join with a node or cp killed when a phase starts keeps every invariant."""
+
+    def run_case(self, replicas, phase, victim):
+        initial = 2 if replicas == 2 else 1
+        c = self.cluster(KV_CP_INITIAL_NODES=initial, KV_CP_REPLICAS=replicas,
+                         KV_CP_MAX_NODES=initial + 1, KV_SYNC_ACK=1).start()
+        for i in range(150):
+            c.put(f'k{i}', f'v{i}')
+        for i in range(0, 150, 15):
+            c.delete(f'k{i}')
+        c.stop()
+        c.start(KV_CP_FAULT=f'{phase}:{victim}')
+        w = Writer(c)
+        w.start()
+        c.req('POST', '/_cp/nodes')
+        if victim == 'cp':
+            c.proc.wait(30)
+            del c.env['KV_CP_FAULT']
+            c.start(wait_nodes=0)
+        # An aborted join is retried, so the new node joins; but a cp restart before FLIP aborts the
+        # join for good, as the admin request is not stored.
+        aborted = victim == 'cp' and phase in ('SPAWN', 'COPY')
+        wait_settled(c, initial if aborted else initial + 1)
+        w.stop()
+        expected = {f'k{i}': (None if i % 15 == 0 else f'v{i}') for i in range(150)}
+        expected.update(w.acked)
+        check_invariants(self, c, expected, [], replicas)
+
+
+def add_matrix():
+    for replicas in (1, 2):
+        for phase in ('SPAWN', 'COPY', 'FLIP', 'DRAIN', 'PURGE'):
+            for victim in ('target', '1', 'cp') + (('2',) if replicas == 2 else ()):
+                def case(self, r=replicas, p=phase, v=victim):
+                    self.run_case(r, p, v)
+                setattr(FaultMatrixTest, f'test_rf{replicas}_{phase.lower()}_{victim}', case)
+    for replicas in (1, 2):
+        for phase in ('RESPAWN', 'REPAIR'):
+            for victim in ('target', 'cp'):
+                def case(self, r=replicas, p=phase, v=victim):
+                    self.run_repair_case(r, p, v)
+                setattr(FaultMatrixTest, f'test_repair_rf{replicas}_{phase.lower()}_{victim}', case)
+
+
+def run_repair_case(self, replicas, phase, victim):
+    initial = 2 if replicas == 2 else 1
+    c = self.cluster(KV_CP_INITIAL_NODES=initial, KV_CP_REPLICAS=replicas, KV_SYNC_ACK=1)
+    c.start(KV_CP_FAULT=f'{phase}:{victim}')
+    for i in range(100):
+        c.put(f'k{i}', f'v{i}')
+    c.delete('k5')
+    w = Writer(c)
+    w.start()
+    c.kill_node(1)
+    if victim == 'cp':
+        c.proc.wait(30)
+        del c.env['KV_CP_FAULT']
+        c.start(wait_nodes=0)
+    else:
+        wait_for(lambda: c.nodes()[1]['state'] != 'ACTIVE', 10, 'node 1 seen dead')
+    wait_settled(c, initial)
+    w.stop()
+    expected = {f'k{i}': (None if i == 5 else f'v{i}') for i in range(100)}
+    expected.update(w.acked)
+    check_invariants(self, c, expected, [], replicas)
+
+
+FaultMatrixTest.run_repair_case = run_repair_case
+add_matrix()
 
 
 if __name__ == '__main__':

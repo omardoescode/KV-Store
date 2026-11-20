@@ -447,7 +447,7 @@ static bool purge_filter(controller *ctl, const char *key, size_t key_len, void 
   return drop;
 }
 
-static void abort_join(controller *ctl, int target) {
+static void abort_join(controller *ctl, int target, bool retry) {
   (void)save_migration(ctl, MIG_ABORT, target);
   driver_fault_point("ABORT", target);
   pthread_mutex_lock(&ctl->c->mu);
@@ -465,6 +465,12 @@ static void abort_join(controller *ctl, int target) {
   set_purge_all(ctl, false);
   (void)save_migration(ctl, MIG_IDLE, 0);
   LOGF(ctl, LOG_WARN, "migration: join of node %d aborted", target);
+  if (retry) {
+    // The next loop runs it again once every node is ACTIVE (a dead source is respawned first).
+    pthread_mutex_lock(&ctl->c->mu);
+    ctl->c->add_requested = true;
+    pthread_mutex_unlock(&ctl->c->mu);
+  }
 }
 
 /** COPY: double-write on, then copy older rows of moving keys to the target. Returns 0 or -1. */
@@ -502,6 +508,13 @@ static int copy_phase(controller *ctl, int target) {
   bool lost_write = ctl->c->double_write_failed;
   pthread_mutex_unlock(&ctl->c->mu);
   if (rc == 0 && (lost_write || !healthy(ctl, addr))) {
+    rc = -1;
+  }
+  // Copied rows must be durable on the target before PURGE deletes them from the old owners.
+  hclient_req flush = {
+      "POST", "/_internal/flush", NULL, NULL, 0, ctl->cfg->forward_timeout_ms * 5,
+  };
+  if (rc == 0 && post(addr, &flush) != 200) {
     rc = -1;
   }
   return rc;
@@ -565,9 +578,9 @@ static void finish_join(controller *ctl, mig_phase from, int target) {
       phase = mig_step(phase, MIG_EV_DRAIN_DONE).next;
     } else if (phase == MIG_PURGE) {
       if (purge_phase(ctl, target) != 0) {
+        // Retry on the next tick, after probes: a dead node is skipped once it is marked DEAD.
         LOGF(ctl, LOG_WARN, "migration: purge failed, retrying");
-        sleep_ms(ctl->cfg->probe_interval_ms);
-        continue;
+        return;
       }
       phase = mig_step(phase, MIG_EV_PURGE_DONE).next;
     } else {
@@ -585,7 +598,8 @@ static void finish_join(controller *ctl, mig_phase from, int target) {
   LOGF(ctl, LOG_INFO, "migration: node %d joined", target);
 }
 
-static void join(controller *ctl) {
+/** Add one node. asked: POST /_cp/nodes asked for it, so an aborted join asks again. */
+static void join(controller *ctl, bool asked) {
   pthread_mutex_lock(&ctl->c->mu);
   int target = 1;
   for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
@@ -607,19 +621,16 @@ static void join(controller *ctl) {
   char addr[DRIVER_ADDR_LEN];
   if (driver_spawn(target, raw) != 0 || resolve(raw, addr) != 0 || !wait_healthy(ctl, addr)) {
     LOGF(ctl, LOG_ERROR, "migration: spawn of node %d failed", target);
-    abort_join(ctl, target);
+    abort_join(ctl, target, asked);
     return;
   }
   pthread_mutex_lock(&ctl->c->mu);
   memcpy(ctl->c->nodes[target].addr, addr, sizeof(addr));
   pthread_mutex_unlock(&ctl->c->mu);
   (void)apply_node_event(ctl, target, NODE_EV_SPAWN_OK);
-  if (save_migration(ctl, MIG_COPY, target) != 0 || copy_phase(ctl, target) != 0) {
-    abort_join(ctl, target);
-    return;
-  }
-  if (save_migration(ctl, MIG_FLIP, target) != 0) {
-    abort_join(ctl, target);
+  if (save_migration(ctl, MIG_COPY, target) != 0 || copy_phase(ctl, target) != 0 ||
+      save_migration(ctl, MIG_FLIP, target) != 0) {
+    abort_join(ctl, target, asked);
     return;
   }
   finish_join(ctl, MIG_FLIP, target);
@@ -709,7 +720,7 @@ static void maybe_join(controller *ctl) {
   bool cooled = mono_ms() - ctl->last_scale_ms >= (int64_t)ctl->cfg->scale_cooldown_s * 1000;
   if (count < ctl->cfg->max_nodes && all_active && (asked || (over && cooled))) {
     LOGF(ctl, LOG_INFO, "migration: adding a node (%s)", asked ? "admin" : "autoscale");
-    join(ctl);
+    join(ctl, asked);
   }
 }
 
@@ -842,7 +853,7 @@ static void restart_migration(controller *ctl, stored_migration mig) {
     pthread_mutex_lock(&c->mu);
     c->nodes[mig.target].in_ring = false;
     pthread_mutex_unlock(&c->mu);
-    abort_join(ctl, mig.target);
+    abort_join(ctl, mig.target, false);
     return;
   }
   if ((r.actions & (MIG_ACT_FLIP | MIG_ACT_DRAIN | MIG_ACT_PURGE)) == 0) {

@@ -42,9 +42,19 @@ Pre-commit hook and CI run format check, clang-tidy and `make memcheck`.
 
 Run `make init` first (submodules).
 
+Full system (control plane on port 7890; it spawns storage nodes as containers through the Docker socket):
+
 ```sh
-docker build -t kv-store .
-docker run -d --name kv -p 7890:7890 -v kv-data:/data kv-store
+docker compose up --build
 ```
 
-Image defaults: `KV_LISTEN_ADDR=0.0.0.0:7890`, `KV_LOG_PATH=-` (request log goes to `docker logs`), `KV_DB_PATH=/data/kv.db`. `/data` is a volume; mount a named volume to keep the database. Set other keys with `-e`, e.g. `-e KV_THREADS=4 -e KV_FLUSH_INTERVAL_MS=50`. `docker stop` sends SIGTERM: the server commits pending writes and exits 0.
+`compose.yaml` builds `Dockerfile.control` (image `kv-control`) and `Dockerfile.storage` (image `kv-storage`), and starts only cp. cp creates `kv-node-<id>` containers with volumes `kv-data-<id>` on network `kv-net`. Set `KV_CP_INITIAL_NODES`, `KV_CP_MAX_NODES`, `KV_CP_REPLICAS`, `KV_CP_SCALE_RPS` and `KV_SYNC_ACK` in the shell or `.env` (see `.env.cp.example`). `docker compose down` stops cp only; the node containers keep running and cp adopts them on its next start.
+
+One storage node without cp:
+
+```sh
+docker build -f Dockerfile.storage -t kv-storage .
+docker run -d --name kv -p 7890:7890 -v kv-data:/data kv-storage
+```
+
+Storage image defaults: `KV_LISTEN_ADDR=0.0.0.0:7890`, `KV_LOG_PATH=-` (request log goes to `docker logs`), `KV_DB_PATH=/data/kv.db`. `/data` is a volume; mount a named volume to keep the database. Set other keys with `-e`, e.g. `-e KV_THREADS=4 -e KV_FLUSH_INTERVAL_MS=50`. `docker stop` sends SIGTERM: the server commits pending writes and exits 0.
