@@ -46,6 +46,14 @@ typedef struct {
   const char *node_image;
   /** A node listens on 127.0.0.1:(node_base_port + id) (process driver). */
   int node_base_port;
+  /** Unix socket of the Docker Engine API (Docker driver). */
+  const char *docker_sock;
+  /** Docker network the node containers join (Docker driver). */
+  const char *node_network;
+  /** Node binary (process driver). */
+  const char *node_bin;
+  /** Directory of node data; NULL if unset (process driver, which requires it). */
+  const char *node_dir;
 } cp_config;
 
 /**

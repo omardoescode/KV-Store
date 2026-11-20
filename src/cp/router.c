@@ -121,8 +121,14 @@ static void finish(op *o, int status, const char *body, size_t len) {
     len = sizeof(unavailable) - 1;
   }
   http_header json = {HTTP_STR("content-type"), HTTP_STR("application/json")};
-  bool is_json = (bool)(o->kind == OP_GET && status == 200);
-  http_resume(o->d, status, is_json ? &json : NULL, is_json ? 1 : 0, body, len);
+  http_header retry = {HTTP_STR("retry-after"), HTTP_STR("1")};
+  const http_header *header = NULL;
+  if (o->kind == OP_GET && status == 200) {
+    header = &json;
+  } else if (status == 503) {
+    header = &retry;
+  }
+  http_resume(o->d, status, header, header ? 1 : 0, body, len);
   o->log->log(o->log->ctx, LOG_INFO, "%s %s %d", kind_names[o->kind], o->path, status);
   if (o->planned) {
     cluster_done(o->c, o->p.epoch);

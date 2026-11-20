@@ -127,12 +127,41 @@ static void test_add_request_stops_at_max_nodes(void) {
   printf("  test_add_request_stops_at_max_nodes OK\n");
 }
 
+static uint64_t write_version(cluster *c, const char *key) {
+  plan p;
+  if (cluster_plan_write(c, key, strlen(key), &p) != 0) {
+    return 0;
+  }
+  cluster_done(c, p.epoch);
+  return p.version;
+}
+
+static void test_versions_after_restart_are_above_the_stored_mark(void) {
+  fixture f = three_nodes();
+  uint64_t before = write_version(f.c, "k0");
+  assert(before != 0);
+  uint64_t mark = 0;
+  assert(cp_store_version_mark(f.store, &mark) == 0);
+  assert(mark > before);
+  cluster_free(f.c);
+  f.c = cluster_new(&cfg, f.store, (logger){quiet, NULL});
+  assert(f.c);
+  assert(cluster_put_node(f.c, 2, "n2", (node_sm){NODE_ACTIVE, 0, false}, true) == 0);
+  // Nothing is reserved above the mark yet: the version would pass it, so the write is refused.
+  assert(write_version(f.c, "k0") == 0);
+  cluster_reserve_versions(f.c);
+  assert(write_version(f.c, "k0") > mark);
+  done(f);
+  printf("  test_versions_after_restart_are_above_the_stored_mark OK\n");
+}
+
 int main(void) {
   printf("cluster tests:\n");
   test_copy_writes_moving_keys_to_target();
   test_flip_moves_reads_to_new_ring();
   test_abort_restores_old_plans();
   test_add_request_stops_at_max_nodes();
+  test_versions_after_restart_are_above_the_stored_mark();
   printf("all cluster tests passed\n");
   return 0;
 }
