@@ -48,7 +48,7 @@ DEP := $(SRC:src/%.c=$(BUILD_DIR)/%.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-ring test-sm test-cluster test-resolve test-controller test-cp test-shutdown memcheck bench bench-cluster format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-vclock test-ring test-sm test-cluster test-resolve test-controller test-cp test-shutdown memcheck bench bench-cluster format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET) $(if $(wildcard src/cp/main.c),$(CP_TARGET) $(CP_PROC_TARGET))
 
@@ -163,6 +163,16 @@ $(KV_STORE_TEST_BIN): $(KV_STORE_TEST_SRC) src/kv/kv_store.h src/hashmap/hashmap
 test-kv-store: $(KV_STORE_TEST_BIN)
 	./$(KV_STORE_TEST_BIN)
 
+VCLOCK_TEST_SRC := src/vclock/vclock.c tests/vclock_test.c
+VCLOCK_TEST_BIN := $(BUILD_DIR)/vclock_test
+
+$(VCLOCK_TEST_BIN): $(VCLOCK_TEST_SRC) src/vclock/vclock.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(VCLOCK_TEST_SRC) -o $@
+
+test-vclock: $(VCLOCK_TEST_BIN)
+	./$(VCLOCK_TEST_BIN)
+
 RING_TEST_SRC := src/cp/ring.c tests/ring_test.c
 RING_TEST_BIN := $(BUILD_DIR)/ring_test
 
@@ -215,7 +225,7 @@ $(CTL_TEST_BIN): $(CTL_TEST_SRC) $(wildcard src/cp/*.h) tests/cp_fake.h $(SIPHAS
 test-controller: $(CTL_TEST_BIN)
 	./$(CTL_TEST_BIN)
 
-TEST_BINS := $(HM_TEST_BIN) $(RING_TEST_BIN) $(SM_TEST_BIN) $(CLUSTER_TEST_BIN) $(RESOLVE_TEST_BIN) $(CTL_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
+TEST_BINS := $(VCLOCK_TEST_BIN) $(HM_TEST_BIN) $(RING_TEST_BIN) $(SM_TEST_BIN) $(CLUSTER_TEST_BIN) $(RESOLVE_TEST_BIN) $(CTL_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
 
 test-cp: $(TARGET) $(CP_PROC_TARGET)
 	python3 tests/cp_test.py
