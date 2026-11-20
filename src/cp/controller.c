@@ -1,5 +1,7 @@
 #include "cp/controller_internal.h"
 
+#include "cp/node_client.h"
+
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,31 +35,10 @@ controller *controller_new(cluster *c, cp_store *store, const cp_config *cfg, lo
   return ctl;
 }
 
-int ctl_call(const char *addr, const hclient_req *req, hclient_resp *out) {
-  hclient_resp resp;
-  if (hclient_do(addr, req, &resp) != 0) {
-    return -1;
-  }
-  if (out) {
-    *out = resp;
-  } else {
-    free(resp.body);
-  }
-  return resp.status;
-}
-
-bool ctl_probe_health(controller *ctl, const char *addr) {
-  int timeout = ctl->cfg->probe_interval_ms < ctl->cfg->forward_timeout_ms
-                    ? ctl->cfg->probe_interval_ms
-                    : ctl->cfg->forward_timeout_ms;
-  hclient_req req = {"GET", "/_internal/health", NULL, NULL, 0, timeout};
-  return ctl_call(addr, &req, NULL) == 200;
-}
-
-bool ctl_wait_healthy(controller *ctl, const char *addr) {
+bool ctl_wait_healthy(const char *addr) {
   int64_t deadline = ctl_mono_ms() + SPAWN_WAIT_MS;
   while (ctl_mono_ms() < deadline) {
-    if (ctl_probe_health(ctl, addr)) {
+    if (node_health(addr)) {
       return true;
     }
     ctl_sleep_ms(50);
@@ -87,23 +68,6 @@ int ctl_resolve(const char *in, char out[DRIVER_ADDR_LEN]) {
   return 0;
 }
 
-static bool is_live(node_state s) { return (bool)(node_takes_writes(s) || s == NODE_SYNCING); }
-
-void ctl_set_purge_all(controller *ctl, bool paused) {
-  static cluster_view v;
-  cluster_snapshot(ctl->c, &v);
-  for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
-    if (!v.nodes[id].exists || !is_live(v.nodes[id].sm.state)) {
-      continue;
-    }
-    const char *body = paused ? "{\"paused\":true}" : "{\"paused\":false}";
-    hclient_req req = {
-        "POST", "/_internal/purge", NULL, body, strlen(body), ctl->cfg->forward_timeout_ms * 5,
-    };
-    (void)ctl_call(v.nodes[id].addr, &req, NULL);
-  }
-}
-
 static bool probed(node_state s) {
   return (bool)(s == NODE_ACTIVE || s == NODE_SUSPECT || s == NODE_REPAIRING);
 }
@@ -119,8 +83,7 @@ static void probe_all(controller *ctl) {
       (void)cluster_node_event(ctl->c, id, NODE_EV_FORWARD_ERROR);
     }
     (void)cluster_node_event(ctl->c, id,
-                             ctl_probe_health(ctl, v.nodes[id].addr) ? NODE_EV_PROBE_OK
-                                                                     : NODE_EV_PROBE_FAIL);
+                             node_health(v.nodes[id].addr) ? NODE_EV_PROBE_OK : NODE_EV_PROBE_FAIL);
   }
 }
 
@@ -129,14 +92,14 @@ static void heal(controller *ctl) {
   cluster_snapshot(ctl->c, &v);
   for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
     if (v.nodes[id].exists && v.nodes[id].sm.state == NODE_DEAD) {
-      ctl_respawn(ctl, id);
+      ctl_heal(ctl, id, NODE_DEAD);
     }
   }
   // A node left REPAIRING (repair failed, or cp restarted) gets its repair again.
   cluster_snapshot(ctl->c, &v);
   for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
-    if (v.nodes[id].exists && v.nodes[id].sm.state == NODE_REPAIRING && ctl_repair(ctl, id) == 0) {
-      (void)cluster_node_event(ctl->c, id, NODE_EV_REPAIR_DONE);
+    if (v.nodes[id].exists && v.nodes[id].sm.state == NODE_REPAIRING) {
+      ctl_heal(ctl, id, NODE_REPAIRING);
     }
   }
 }
@@ -179,6 +142,19 @@ static void maybe_join(controller *ctl) {
   }
 }
 
+void controller_tick(controller *ctl) {
+  cluster_reserve_versions(ctl->c);
+  probe_all(ctl);
+  heal(ctl);
+  static cluster_view v;
+  cluster_snapshot(ctl->c, &v);
+  if (v.phase == MIG_PURGE) {
+    ctl_finish_join(ctl, v.phase, v.target);
+  } else {
+    maybe_join(ctl);
+  }
+}
+
 static void *controller_main(void *arg) {
   controller *ctl = arg;
   pthread_setname_np(pthread_self(), "cp-controller");
@@ -196,16 +172,7 @@ static void *controller_main(void *arg) {
     if (stop) {
       return NULL;
     }
-    cluster_reserve_versions(ctl->c);
-    probe_all(ctl);
-    heal(ctl);
-    static cluster_view v;
-    cluster_snapshot(ctl->c, &v);
-    if (v.phase == MIG_PURGE) {
-      ctl_finish_join(ctl, v.phase, v.target);
-    } else {
-      maybe_join(ctl);
-    }
+    controller_tick(ctl);
   }
 }
 

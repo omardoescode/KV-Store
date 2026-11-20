@@ -1,6 +1,6 @@
 #include "cp/controller_internal.h"
 
-#include <string.h>
+#include "cp/node_client.h"
 
 static void abort_join(controller *ctl, int target, bool retry) {
   (void)cluster_set_phase(ctl->c, MIG_ABORT, target);
@@ -10,7 +10,7 @@ static void abort_join(controller *ctl, int target, bool retry) {
   (void)cluster_drain(ctl->c, DRAIN_TIMEOUT_MS);
   (void)driver_stop(target);
   (void)cluster_drop_node(ctl->c, target);
-  ctl_set_purge_all(ctl, false);
+  ctl_pause_purge(ctl, false);
   (void)cluster_set_phase(ctl->c, MIG_IDLE, 0);
   LOGF(ctl, LOG_WARN, "migration: join of node %d aborted", target);
   if (retry) {
@@ -29,7 +29,7 @@ static int copy_phase(controller *ctl, int target) {
   if (cluster_drain(ctl->c, DRAIN_TIMEOUT_MS) != 0) {
     return -1;
   }
-  ctl_set_purge_all(ctl, true);
+  ctl_pause_purge(ctl, true);
   static cluster_view v;
   cluster_snapshot(ctl->c, &v);
   static bool readers[CLUSTER_MAX_NODES + 1];
@@ -44,14 +44,11 @@ static int copy_phase(controller *ctl, int target) {
       rc = ctl_move_rows(ctl, &x, src, v.nodes[src].addr, target, addr);
     }
   }
-  if (rc == 0 && (cluster_copy_lost_write(ctl->c) || !ctl_probe_health(ctl, addr))) {
+  if (rc == 0 && (cluster_copy_lost_write(ctl->c) || !node_health(addr))) {
     rc = -1;
   }
   // Copied rows must be durable on the target before PURGE deletes them from the old owners.
-  hclient_req flush = {
-      "POST", "/_internal/flush", NULL, NULL, 0, ctl->cfg->forward_timeout_ms * 5,
-  };
-  if (rc == 0 && ctl_call(addr, &flush, NULL) != 200) {
+  if (rc == 0 && node_flush(addr) != 0) {
     rc = -1;
   }
   return rc;
@@ -70,7 +67,7 @@ static int purge_phase(controller *ctl, int target) {
     }
   }
   if (rc == 0) {
-    ctl_set_purge_all(ctl, false);
+    ctl_pause_purge(ctl, false);
   }
   return rc;
 }
@@ -113,8 +110,7 @@ void ctl_join(controller *ctl, bool asked) {
   (void)cluster_put_node(ctl->c, target, "", (node_sm){NODE_SPAWNING, 0, false}, false);
   char raw[DRIVER_ADDR_LEN];
   char addr[DRIVER_ADDR_LEN];
-  if (driver_spawn(target, raw) != 0 || ctl_resolve(raw, addr) != 0 ||
-      !ctl_wait_healthy(ctl, addr)) {
+  if (driver_spawn(target, raw) != 0 || ctl_resolve(raw, addr) != 0 || !ctl_wait_healthy(addr)) {
     LOGF(ctl, LOG_ERROR, "migration: spawn of node %d failed", target);
     abort_join(ctl, target, asked);
     return;
