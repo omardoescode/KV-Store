@@ -101,9 +101,8 @@ void ctl_heal(controller *ctl, int id, node_state state) {
     return;
   }
   driver_fault_point("RESPAWN", id);
-  char raw[DRIVER_ADDR_LEN];
   char addr[DRIVER_ADDR_LEN];
-  if (driver_spawn(id, raw) != 0 || ctl_resolve(raw, addr) != 0 || !ctl_wait_healthy(addr)) {
+  if (ctl_spawn_ready(id, addr) != 0) {
     LOGF(ctl, LOG_ERROR, "node %d: spawn failed", id);
     (void)cluster_node_event(ctl->c, id, NODE_EV_SPAWN_FAIL);
     return;

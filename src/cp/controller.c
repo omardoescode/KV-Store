@@ -2,7 +2,8 @@
 
 #include "cp/node_client.h"
 
-#include <netdb.h>
+enum { SPAWN_WAIT_MS = 15000 };
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,37 +36,18 @@ controller *controller_new(cluster *c, cp_store *store, const cp_config *cfg, lo
   return ctl;
 }
 
-bool ctl_wait_healthy(const char *addr) {
+int ctl_spawn_ready(int id, char addr[DRIVER_ADDR_LEN]) {
+  if (driver_spawn(id, addr) != 0) {
+    return -1;
+  }
   int64_t deadline = ctl_mono_ms() + SPAWN_WAIT_MS;
   while (ctl_mono_ms() < deadline) {
     if (node_health(addr)) {
-      return true;
+      return 0;
     }
     ctl_sleep_ms(50);
   }
-  return false;
-}
-
-int ctl_resolve(const char *in, char out[DRIVER_ADDR_LEN]) {
-  const char *colon = strrchr(in, ':');
-  if (!colon) {
-    return -1;
-  }
-  char host[DRIVER_ADDR_LEN];
-  (void)snprintf(host, sizeof(host), "%.*s", (int)(colon - in), in);
-  struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
-  struct addrinfo *ai = NULL;
-  if (getaddrinfo(host, colon + 1, &hints, &ai) != 0) {
-    return -1;
-  }
-  char ip[64];
-  int rc = getnameinfo(ai->ai_addr, ai->ai_addrlen, ip, sizeof(ip), NULL, 0, NI_NUMERICHOST);
-  freeaddrinfo(ai);
-  if (rc != 0) {
-    return -1;
-  }
-  (void)snprintf(out, DRIVER_ADDR_LEN, "%s%s", ip, colon);
-  return 0;
+  return -1;
 }
 
 static bool probed(node_state s) {

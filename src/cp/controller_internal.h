@@ -8,11 +8,7 @@
 #include "cp/controller.h"
 #include "cp/driver.h"
 
-enum {
-  SPAWN_WAIT_MS = 15000,
-  DRAIN_TIMEOUT_MS = 30000,
-  START_SPAWN_TRIES = 5,
-};
+enum { DRAIN_TIMEOUT_MS = 30000 };
 
 struct controller {
   cluster *c;
@@ -34,10 +30,8 @@ struct controller {
 int64_t ctl_mono_ms(void);
 void ctl_sleep_ms(int ms);
 
-/** Probe addr until it answers or SPAWN_WAIT_MS passes. */
-bool ctl_wait_healthy(const char *addr);
-/** Resolve the host of "host:port" to a numeric "ip:port" in out. Returns 0 or -1. */
-int ctl_resolve(const char *in, char out[DRIVER_ADDR_LEN]);
+/** Spawn node id, write its address to addr and wait until it answers. Returns 0 or -1. */
+int ctl_spawn_ready(int id, char addr[DRIVER_ADDR_LEN]);
 
 /** Pause or resume the tombstone purge on every live node. */
 void ctl_pause_purge(controller *ctl, bool paused);
