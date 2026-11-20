@@ -149,9 +149,11 @@ int cp_config_load(cp_config *cfg) {
     return -1;
   }
   long threads = 0;
-  long initial = 1;
+  long initial = 3;
   long max_nodes = 3;
-  long replicas = 1;
+  long replicas = 3;
+  long read_quorum = 2;
+  long write_quorum = 2;
   long vnodes = 128;
   long scale_rps = 0;
   long window_s = 10;
@@ -167,6 +169,8 @@ int cp_config_load(cp_config *cfg) {
   }
   // 16 = RING_MAX_REPLICAS: the ring keeps at most 16 replicas of a key.
   if (env_range("KV_CP_REPLICAS", &replicas, 1, 16) != 0 ||
+      env_range("KV_CP_READ_QUORUM", &read_quorum, 1, 16) != 0 ||
+      env_range("KV_CP_WRITE_QUORUM", &write_quorum, 1, 16) != 0 ||
       env_range("KV_CP_VNODES", &vnodes, 1, 4096) != 0 ||
       env_range("KV_CP_SCALE_RPS", &scale_rps, 0, 1000000000) != 0 ||
       env_range("KV_CP_SCALE_WINDOW_S", &window_s, 1, 3600) != 0 ||
@@ -187,10 +191,25 @@ int cp_config_load(cp_config *cfg) {
                   initial, max_nodes);
     return -1;
   }
+  if (read_quorum > replicas || write_quorum > replicas) {
+    (void)fprintf(stderr,
+                  "config: KV_CP_READ_QUORUM=%ld and KV_CP_WRITE_QUORUM=%ld must be <= "
+                  "KV_CP_REPLICAS=%ld\n",
+                  read_quorum, write_quorum, replicas);
+    return -1;
+  }
+  if (read_quorum + write_quorum <= replicas) {
+    (void)fprintf(stderr,
+                  "config: warning: KV_CP_READ_QUORUM=%ld + KV_CP_WRITE_QUORUM=%ld <= "
+                  "KV_CP_REPLICAS=%ld, so reads may be stale\n",
+                  read_quorum, write_quorum, replicas);
+  }
   cfg->threads = (int)threads;
   cfg->initial_nodes = (int)initial;
   cfg->max_nodes = (int)max_nodes;
   cfg->replicas = (int)replicas;
+  cfg->read_quorum = (int)read_quorum;
+  cfg->write_quorum = (int)write_quorum;
   cfg->vnodes = (int)vnodes;
   cfg->scale_rps = scale_rps;
   cfg->scale_window_s = (int)window_s;

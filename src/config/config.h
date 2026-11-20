@@ -33,7 +33,12 @@ typedef struct {
   int initial_nodes;
   /** Not used yet: no scale-down. */
   int max_nodes;
+  /** N: the home replicas of a key. */
   int replicas;
+  /** R: replicas that must answer a read, 1..N. */
+  int read_quorum;
+  /** W: replicas that must ack a write, 1..N. */
+  int write_quorum;
   int vnodes;
   /** RPS of one node over the window that adds a node; 0 turns autoscale off. */
   long scale_rps;
@@ -57,8 +62,9 @@ typedef struct {
 } cp_config;
 
 /**
- * Fill cfg from the environment like config_load. Also fails if REPLICAS > INITIAL_NODES or
- * INITIAL_NODES > MAX_NODES.
+ * Fill cfg from the environment like config_load. Also fails if REPLICAS > INITIAL_NODES,
+ * INITIAL_NODES > MAX_NODES, or READ_QUORUM or WRITE_QUORUM > REPLICAS. Warns on stderr if
+ * READ_QUORUM + WRITE_QUORUM <= REPLICAS: the quorums may not overlap.
  */
 int cp_config_load(cp_config *cfg);
 

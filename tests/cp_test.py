@@ -66,8 +66,14 @@ class Cluster:
             'KV_CP_PROBE_INTERVAL_MS': '100',
             'KV_CP_PROBE_FAILS': '3',
             'KV_CP_SCALE_COOLDOWN_S': '0',
+            'KV_CP_INITIAL_NODES': '1',
+            'KV_CP_REPLICAS': '1',
         }
         self.env.update({k: str(v) for k, v in env.items()})
+        # R and W default to 2 in cp; a test with N=1 gets 1.
+        quorum = str(min(2, int(self.env['KV_CP_REPLICAS'])))
+        self.env.setdefault('KV_CP_READ_QUORUM', quorum)
+        self.env.setdefault('KV_CP_WRITE_QUORUM', quorum)
         self.proc = None
         self.writers = []
 

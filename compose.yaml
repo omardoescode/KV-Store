@@ -15,9 +15,11 @@ services:
       - kv-net
     restart: unless-stopped
     environment:
-      KV_CP_INITIAL_NODES: ${KV_CP_INITIAL_NODES:-1}
+      KV_CP_INITIAL_NODES: ${KV_CP_INITIAL_NODES:-3}
       KV_CP_MAX_NODES: ${KV_CP_MAX_NODES:-3}
-      KV_CP_REPLICAS: ${KV_CP_REPLICAS:-1}
+      KV_CP_REPLICAS: ${KV_CP_REPLICAS:-3}
+      KV_CP_READ_QUORUM: ${KV_CP_READ_QUORUM:-2}
+      KV_CP_WRITE_QUORUM: ${KV_CP_WRITE_QUORUM:-2}
       KV_CP_SCALE_RPS: ${KV_CP_SCALE_RPS:-}
       KV_SYNC_ACK: ${KV_SYNC_ACK:-0}
     depends_on:

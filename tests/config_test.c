@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static const char *const VARS[] = {
     "KV_LISTEN_ADDR",       "KV_LOG_PATH",    "KV_DB_PATH",  "KV_THREADS",
@@ -127,6 +128,7 @@ static const char *const CP_VARS[] = {
     "KV_CP_NODE_IMAGE",       "KV_CP_NODE_BASE_PORT",
     "KV_CP_DOCKER_SOCK",      "KV_CP_NODE_NETWORK",
     "KV_CP_NODE_BIN",         "KV_CP_NODE_DIR",
+    "KV_CP_READ_QUORUM",      "KV_CP_WRITE_QUORUM",
 };
 
 static void cp_set_required(void) {
@@ -146,9 +148,11 @@ static void test_cp_defaults(void) {
   assert(strcmp(cfg.db_path, "cp.db") == 0);
   assert(strcmp(cfg.log_path, "-") == 0);
   assert(cfg.threads == 0);
-  assert(cfg.initial_nodes == 1);
+  assert(cfg.initial_nodes == 3);
   assert(cfg.max_nodes == 3);
-  assert(cfg.replicas == 1);
+  assert(cfg.replicas == 3);
+  assert(cfg.read_quorum == 2);
+  assert(cfg.write_quorum == 2);
   assert(cfg.vnodes == 128);
   assert(cfg.scale_rps == 0);
   assert(cfg.scale_window_s == 10);
@@ -170,6 +174,8 @@ static void test_cp_overrides(void) {
   setenv("KV_CP_INITIAL_NODES", "3", 1);
   setenv("KV_CP_MAX_NODES", "5", 1);
   setenv("KV_CP_REPLICAS", "2", 1);
+  setenv("KV_CP_READ_QUORUM", "1", 1);
+  setenv("KV_CP_WRITE_QUORUM", "2", 1);
   setenv("KV_CP_SCALE_RPS", "500", 1);
   setenv("KV_CP_NODE_IMAGE", "img:1", 1);
   setenv("KV_CP_NODE_BASE_PORT", "8000", 1);
@@ -186,6 +192,8 @@ static void test_cp_overrides(void) {
   assert(cfg.initial_nodes == 3);
   assert(cfg.max_nodes == 5);
   assert(cfg.replicas == 2);
+  assert(cfg.read_quorum == 1);
+  assert(cfg.write_quorum == 2);
   assert(cfg.scale_rps == 500);
   assert(strcmp(cfg.node_image, "img:1") == 0);
   assert(cfg.node_base_port == 8000);
@@ -205,7 +213,12 @@ static void test_cp_bad(void) {
   cp_config cfg;
   assert(cp_config_load(&cfg) == -1);
   cp_expect_bad("KV_CP_LISTEN_ADDR", "nohostport");
-  cp_expect_bad("KV_CP_REPLICAS", "2");
+  cp_expect_bad("KV_CP_REPLICAS", "4");
+  cp_expect_bad("KV_CP_READ_QUORUM", "0");
+  cp_expect_bad("KV_CP_READ_QUORUM", "4");
+  cp_expect_bad("KV_CP_WRITE_QUORUM", "0");
+  cp_expect_bad("KV_CP_WRITE_QUORUM", "4");
+  cp_expect_bad("KV_CP_REPLICAS", "1");
   cp_expect_bad("KV_CP_INITIAL_NODES", "4");
   cp_expect_bad("KV_CP_INITIAL_NODES", "0");
   cp_expect_bad("KV_CP_VNODES", "0");
@@ -226,6 +239,43 @@ static void test_cp_bad(void) {
   printf("  test_cp_bad OK\n");
 }
 
+/** Load the cp config with stderr sent to a file; return what it printed (static buffer). */
+static const char *cp_load_stderr(int *rc) {
+  static char out[4096];
+  FILE *capture = tmpfile();
+  assert(capture);
+  (void)fflush(stderr);
+  int saved = dup(STDERR_FILENO);
+  assert(saved >= 0 && dup2(fileno(capture), STDERR_FILENO) >= 0);
+  cp_config cfg;
+  *rc = cp_config_load(&cfg);
+  (void)fflush(stderr);
+  assert(dup2(saved, STDERR_FILENO) >= 0);
+  close(saved);
+  rewind(capture);
+  size_t n = fread(out, 1, sizeof(out) - 1, capture);
+  out[n] = '\0';
+  (void)fclose(capture);
+  return out;
+}
+
+static void test_cp_warns_when_quorums_may_not_overlap(void) {
+  int rc = -1;
+  cp_set_required();
+  setenv("KV_CP_READ_QUORUM", "1", 1);
+  setenv("KV_CP_WRITE_QUORUM", "2", 1);
+  assert(strstr(cp_load_stderr(&rc), "stale") != NULL && rc == 0);
+  cp_set_required();
+  setenv("KV_CP_READ_QUORUM", "2", 1);
+  assert(strcmp(cp_load_stderr(&rc), "") == 0 && rc == 0);
+  setenv("KV_CP_INITIAL_NODES", "1", 1);
+  setenv("KV_CP_REPLICAS", "1", 1);
+  setenv("KV_CP_READ_QUORUM", "1", 1);
+  setenv("KV_CP_WRITE_QUORUM", "1", 1);
+  assert(strcmp(cp_load_stderr(&rc), "") == 0 && rc == 0);
+  printf("  test_cp_warns_when_quorums_may_not_overlap OK\n");
+}
+
 int main(void) {
   printf("config tests:\n");
   test_required_set_uses_optional_defaults();
@@ -237,6 +287,7 @@ int main(void) {
   test_cp_defaults();
   test_cp_overrides();
   test_cp_bad();
+  test_cp_warns_when_quorums_may_not_overlap();
   printf("all config tests passed\n");
   return 0;
 }
