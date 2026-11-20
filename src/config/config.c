@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+// sizeof(sockaddr_un.sun_path) on Linux, with its NUL.
+enum { SUN_PATH_LEN = 108 };
+
 /** Parse name as a long into *out; leave *out unchanged if unset or empty. */
 static int env_long(const char *name, long *out) {
   const char *v = getenv(name);
@@ -95,6 +98,35 @@ static int env_range(const char *name, long *out, long min, long max) {
   return 0;
 }
 
+/** Read the settings of the node drivers into cfg. Returns 0 or -1. */
+static int load_driver_settings(cp_config *cfg) {
+  const char *sock = getenv("KV_CP_DOCKER_SOCK");
+  cfg->docker_sock = sock && *sock ? sock : "/var/run/docker.sock";
+  if (cfg->docker_sock[0] != '/' || strlen(cfg->docker_sock) >= (size_t)SUN_PATH_LEN) {
+    (void)fprintf(stderr,
+                  "config: KV_CP_DOCKER_SOCK=\"%s\" must be an absolute path under %zu bytes\n",
+                  cfg->docker_sock, (size_t)SUN_PATH_LEN);
+    return -1;
+  }
+  const char *net = getenv("KV_CP_NODE_NETWORK");
+  cfg->node_network = net && *net ? net : "kv-net";
+  // Docker names: [a-zA-Z0-9][a-zA-Z0-9_.-]*
+  static const char name_chars[] =
+      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-";
+  const char *net_name = cfg->node_network;
+  if (strspn(net_name, name_chars) != strlen(net_name) || strchr("_.-", net_name[0]) != NULL) {
+    (void)fprintf(stderr,
+                  "config: KV_CP_NODE_NETWORK=\"%s\" must match [a-zA-Z0-9][a-zA-Z0-9_.-]*\n",
+                  cfg->node_network);
+    return -1;
+  }
+  const char *bin = getenv("KV_CP_NODE_BIN");
+  cfg->node_bin = bin && *bin ? bin : "./build/app";
+  const char *dir = getenv("KV_CP_NODE_DIR");
+  cfg->node_dir = dir && *dir ? dir : NULL;
+  return 0;
+}
+
 int cp_config_load(cp_config *cfg) {
   static const char *const required[] = {"KV_CP_LISTEN_ADDR", "KV_CP_DB_PATH", "KV_CP_LOG_PATH"};
   const char *values[3];
@@ -169,5 +201,5 @@ int cp_config_load(cp_config *cfg) {
   const char *image = getenv("KV_CP_NODE_IMAGE");
   cfg->node_image = image && *image ? image : "kv-storage";
   cfg->node_base_port = (int)base_port;
-  return 0;
+  return load_driver_settings(cfg);
 }

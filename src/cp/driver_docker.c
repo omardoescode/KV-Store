@@ -25,11 +25,8 @@ static const char *const passed_env[] = {
 int driver_init(const cp_config *cfg, logger log) {
   dlog = log;
   image = cfg->node_image;
-  const char *sock = getenv("KV_CP_DOCKER_SOCK");
-  const char *net = getenv("KV_CP_NODE_NETWORK");
-  network = net && *net ? net : "kv-net";
-  (void)snprintf(sock_addr, sizeof(sock_addr), "unix:%s",
-                 sock && *sock ? sock : "/var/run/docker.sock");
+  network = cfg->node_network;
+  (void)snprintf(sock_addr, sizeof(sock_addr), "unix:%s", cfg->docker_sock);
   return 0;
 }
 

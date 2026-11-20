@@ -125,6 +125,8 @@ static const char *const CP_VARS[] = {
     "KV_CP_SCALE_COOLDOWN_S", "KV_CP_PROBE_INTERVAL_MS",
     "KV_CP_PROBE_FAILS",      "KV_CP_FORWARD_TIMEOUT_MS",
     "KV_CP_NODE_IMAGE",       "KV_CP_NODE_BASE_PORT",
+    "KV_CP_DOCKER_SOCK",      "KV_CP_NODE_NETWORK",
+    "KV_CP_NODE_BIN",         "KV_CP_NODE_DIR",
 };
 
 static void cp_set_required(void) {
@@ -156,6 +158,10 @@ static void test_cp_defaults(void) {
   assert(cfg.forward_timeout_ms == 2000);
   assert(strcmp(cfg.node_image, "kv-storage") == 0);
   assert(cfg.node_base_port == 7900);
+  assert(strcmp(cfg.docker_sock, "/var/run/docker.sock") == 0);
+  assert(strcmp(cfg.node_network, "kv-net") == 0);
+  assert(strcmp(cfg.node_bin, "./build/app") == 0);
+  assert(cfg.node_dir == NULL);
   printf("  test_cp_defaults OK\n");
 }
 
@@ -167,8 +173,16 @@ static void test_cp_overrides(void) {
   setenv("KV_CP_SCALE_RPS", "500", 1);
   setenv("KV_CP_NODE_IMAGE", "img:1", 1);
   setenv("KV_CP_NODE_BASE_PORT", "8000", 1);
+  setenv("KV_CP_DOCKER_SOCK", "/run/docker.sock", 1);
+  setenv("KV_CP_NODE_NETWORK", "my_net.1", 1);
+  setenv("KV_CP_NODE_BIN", "/usr/bin/kv", 1);
+  setenv("KV_CP_NODE_DIR", "/tmp/nodes", 1);
   cp_config cfg;
   assert(cp_config_load(&cfg) == 0);
+  assert(strcmp(cfg.docker_sock, "/run/docker.sock") == 0);
+  assert(strcmp(cfg.node_network, "my_net.1") == 0);
+  assert(strcmp(cfg.node_bin, "/usr/bin/kv") == 0);
+  assert(strcmp(cfg.node_dir, "/tmp/nodes") == 0);
   assert(cfg.initial_nodes == 3);
   assert(cfg.max_nodes == 5);
   assert(cfg.replicas == 2);
@@ -198,6 +212,12 @@ static void test_cp_bad(void) {
   cp_expect_bad("KV_CP_PROBE_FAILS", "0");
   cp_expect_bad("KV_CP_SCALE_RPS", "-1");
   cp_expect_bad("KV_CP_NODE_BASE_PORT", "65536");
+  cp_expect_bad("KV_CP_DOCKER_SOCK", "docker.sock");
+  cp_expect_bad("KV_CP_DOCKER_SOCK",
+                "/a/very/long/path/that/does/not/fit/in/sun_path/of/a/unix/socket/"
+                "address/which/holds/at/most/108/bytes/with/its/nul.sock");
+  cp_expect_bad("KV_CP_NODE_NETWORK", "bad net");
+  cp_expect_bad("KV_CP_NODE_NETWORK", "-net");
   cp_set_required();
   setenv("KV_CP_INITIAL_NODES", "17", 1);
   setenv("KV_CP_MAX_NODES", "17", 1);
