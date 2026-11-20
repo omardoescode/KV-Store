@@ -119,3 +119,21 @@ int ring_has(const ring *r, int id, const char *key, size_t key_len) {
   }
   return 0;
 }
+
+int xfer_source(const xfer *x, const char *key, size_t len, int target) {
+  if (!ring_has(x->to, target, key, len)) {
+    return 0;
+  }
+  int prefs[RING_MAX_REPLICAS];
+  size_t n = ring_prefs(x->from, key, len, prefs);
+  for (size_t i = 0; i != n; i++) {
+    if (prefs[i] != target && x->readers[prefs[i]]) {
+      return prefs[i];
+    }
+  }
+  return 0;
+}
+
+bool xfer_drops(const xfer *x, int node, const char *key, size_t len) {
+  return (bool)(ring_has(x->from, node, key, len) && !ring_has(x->to, node, key, len));
+}

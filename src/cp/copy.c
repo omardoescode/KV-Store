@@ -68,7 +68,8 @@ static void sink_row(sink *s, const json_val *row) {
   }
 }
 
-static int copy_into(controller *ctl, const char *src, row_filter filter, void *arg, sink *s) {
+static int copy_into(controller *ctl, const xfer *x, int node, const char *src, int target,
+                     sink *s) {
   hclient_req flush = {
       "POST", "/_internal/flush", NULL, NULL, 0, ctl->cfg->forward_timeout_ms * 5,
   };
@@ -106,7 +107,13 @@ static int copy_into(controller *ctl, const char *src, row_filter filter, void *
       const json_val *row = json_at(items, i);
       size_t key_len = 0;
       const char *key = json_str(json_get(row, "key"), &key_len);
-      if (key && filter(ctl, key, key_len, arg)) {
+      bool moves = false;
+      if (key && target != 0) {
+        moves = xfer_source(x, key, key_len, target) == node;
+      } else if (key) {
+        moves = xfer_drops(x, node, key, key_len);
+      }
+      if (moves) {
         sink_row(s, row);
       }
     }
@@ -129,38 +136,21 @@ static int copy_into(controller *ctl, const char *src, row_filter filter, void *
   return -1;
 }
 
-int ctl_copy_rows(controller *ctl, const char *src, row_filter filter, void *arg, const char *dst,
-                  const char *path) {
-  sink s = {ctl, dst, path, NULL, NULL, 0, 0};
+int ctl_move_rows(controller *ctl, const xfer *x, int node, const char *addr, int target,
+                  const char *dst) {
+  sink s = {
+      ctl,
+      target != 0 ? dst : addr,
+      target != 0 ? "/_internal/batch" : "/_internal/delete-batch",
+      NULL,
+      NULL,
+      0,
+      0,
+  };
   sink_reset(&s);
-  int rc = copy_into(ctl, src, filter, arg, &s);
+  int rc = copy_into(ctl, x, node, addr, target, &s);
   json_builder_free(s.b);
   return rc;
-}
-
-int ctl_first_reader(const cluster_view *v, const ring *r, const char *key, size_t key_len,
-                     int skip) {
-  int prefs[RING_MAX_REPLICAS];
-  size_t n = ring_prefs(r, key, key_len, prefs);
-  for (size_t i = 0; i != n; i++) {
-    if (prefs[i] != skip && node_serves_reads(v->nodes[prefs[i]].sm.state)) {
-      return prefs[i];
-    }
-  }
-  return 0;
-}
-
-typedef struct {
-  const cluster_view *v;
-  int node;
-  int source;
-} repair_arg;
-
-static bool repair_filter(controller *ctl, const char *key, size_t key_len, void *arg) {
-  (void)ctl;
-  repair_arg *a = arg;
-  return (bool)(ring_has(a->v->ring, a->node, key, key_len) &&
-                ctl_first_reader(a->v, a->v->ring, key, key_len, a->node) == a->source);
 }
 
 int ctl_repair(controller *ctl, int id) {
@@ -172,12 +162,15 @@ int ctl_repair(controller *ctl, int id) {
   ctl_set_purge_all(ctl, true);
   static cluster_view v;
   cluster_snapshot(ctl->c, &v);
+  static bool readers[CLUSTER_MAX_NODES + 1];
+  for (int src = 1; src <= CLUSTER_MAX_NODES; src++) {
+    readers[src] = (bool)(v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state));
+  }
+  xfer x = {v.ring, v.ring, readers};
   int rc = 0;
   for (int src = 1; src <= CLUSTER_MAX_NODES && rc == 0; src++) {
-    if (v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state)) {
-      repair_arg a = {&v, id, src};
-      rc = ctl_copy_rows(ctl, v.nodes[src].addr, repair_filter, &a, v.nodes[id].addr,
-                         "/_internal/batch");
+    if (readers[src]) {
+      rc = ctl_move_rows(ctl, &x, src, v.nodes[src].addr, id, v.nodes[id].addr);
     }
   }
   ctl_set_purge_all(ctl, false);

@@ -1,6 +1,7 @@
 #include "cp/ring.h"
 
 #include <assert.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -108,6 +109,72 @@ static void test_empty_ring(void) {
   printf("  test_empty_ring OK\n");
 }
 
+// Owners with vnodes 128 and 2 replicas, {1,2,3} -> {1,2,3,4}: k2 {1,3} -> {4,1},
+// k7 {2,3} -> {4,2}, k6 {1,3} -> {1,4}, k0 {2,3} -> {2,3}.
+typedef struct {
+  ring *old;
+  ring *now;
+  bool readers[5];
+} join_rings;
+
+static join_rings join_3_to_4(void) {
+  int before[] = {1, 2, 3};
+  int after[] = {1, 2, 3, 4};
+  return (join_rings){make(before, 3, 128, 2), make(after, 4, 128, 2), {0, 1, 1, 1, 1}};
+}
+
+static int source(const join_rings *j, const char *key) {
+  xfer x = {j->old, j->now, j->readers};
+  return xfer_source(&x, key, strlen(key), 4);
+}
+
+static void test_join_has_one_source_per_moved_key(void) {
+  join_rings j = join_3_to_4();
+  assert(source(&j, "k2") == 1);
+  assert(source(&j, "k7") == 2);
+  assert(source(&j, "k6") == 1);
+  assert(source(&j, "k0") == 0);
+  ring_free(j.old);
+  ring_free(j.now);
+  printf("  test_join_has_one_source_per_moved_key OK\n");
+}
+
+static void test_dead_reader_is_skipped(void) {
+  join_rings j = join_3_to_4();
+  j.readers[1] = false;
+  assert(source(&j, "k2") == 3);
+  j.readers[3] = false;
+  assert(source(&j, "k2") == 0);
+  ring_free(j.old);
+  ring_free(j.now);
+  printf("  test_dead_reader_is_skipped OK\n");
+}
+
+static void test_repair_sends_each_key_of_the_node_from_one_reader(void) {
+  join_rings j = join_3_to_4();
+  xfer x = {j.now, j.now, j.readers};
+  assert(xfer_source(&x, "k2", 2, 1) == 4);
+  assert(xfer_source(&x, "k0", 2, 3) == 2);
+  assert(xfer_source(&x, "k0", 2, 1) == 0);
+  ring_free(j.old);
+  ring_free(j.now);
+  printf("  test_repair_sends_each_key_of_the_node_from_one_reader OK\n");
+}
+
+static void test_purge_drops_keys_a_node_lost(void) {
+  join_rings j = join_3_to_4();
+  xfer x = {j.old, j.now, j.readers};
+  assert(xfer_drops(&x, 3, "k2", 2));
+  assert(!xfer_drops(&x, 1, "k2", 2));
+  assert(xfer_drops(&x, 3, "k7", 2));
+  assert(!xfer_drops(&x, 2, "k7", 2));
+  assert(!xfer_drops(&x, 3, "k0", 2));
+  assert(!xfer_drops(&x, 4, "k2", 2));
+  ring_free(j.old);
+  ring_free(j.now);
+  printf("  test_purge_drops_keys_a_node_lost OK\n");
+}
+
 int main(void) {
   printf("ring tests:\n");
   test_fixed_owners();
@@ -116,6 +183,10 @@ int main(void) {
   test_share_is_balanced();
   test_join_moves_about_one_nth();
   test_empty_ring();
+  test_join_has_one_source_per_moved_key();
+  test_dead_reader_is_skipped();
+  test_repair_sends_each_key_of_the_node_from_one_reader();
+  test_purge_drops_keys_a_node_lost();
   printf("all ring tests passed\n");
   return 0;
 }

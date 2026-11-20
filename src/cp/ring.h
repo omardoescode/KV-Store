@@ -1,6 +1,7 @@
 #ifndef CP_RING_H
 #define CP_RING_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 /**
@@ -34,5 +35,24 @@ size_t ring_prefs(const ring *r, const char *key, size_t key_len, int *out);
 
 /** Return whether id is in the preference list of key. */
 int ring_has(const ring *r, int id, const char *key, size_t key_len);
+
+/**
+ * Which rows move when the ring changes from `from` to `to`. readers is indexed by node id: the
+ * nodes that serve reads.
+ */
+typedef struct {
+  const ring *from;
+  const ring *to;
+  const bool *readers;
+} xfer;
+
+/**
+ * Return the one node that sends key to target: the first reader of key in from, other than
+ * target. 0 if target does not hold key in to, or no reader has it.
+ */
+int xfer_source(const xfer *x, const char *key, size_t len, int target);
+
+/** Return whether node held key in from but not in to, so it deletes key. */
+bool xfer_drops(const xfer *x, int node, const char *key, size_t len);
 
 #endif
