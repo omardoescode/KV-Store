@@ -203,7 +203,7 @@ $(RESOLVE_TEST_BIN): $(RESOLVE_TEST_SRC) src/cp/resolve.h src/cp/driver.h
 test-resolve: $(RESOLVE_TEST_BIN)
 	./$(RESOLVE_TEST_BIN)
 
-CTL_TEST_SRC := src/cp/controller.c src/cp/copy.c src/cp/join.c src/cp/startup.c src/cp/cluster.c \
+CTL_TEST_SRC := src/cp/controller.c src/cp/nodes.c src/cp/cluster.c \
                 src/cp/ring.c src/cp/sm.c src/cp/store.c tests/node_client_fake.c tests/driver_fake.c \
                 tests/controller_test.c
 CTL_TEST_BIN := $(BUILD_DIR)/controller_test
