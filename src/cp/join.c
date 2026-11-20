@@ -3,66 +3,50 @@
 #include <string.h>
 
 typedef struct {
+  const cluster_view *v;
   int source;
   int target;
 } join_arg;
 
 static bool copy_filter(controller *ctl, const char *key, size_t key_len, void *arg) {
+  (void)ctl;
   join_arg *a = arg;
-  pthread_mutex_lock(&ctl->c->mu);
-  bool keep = (bool)(ctl->c->next && ring_has(ctl->c->next, a->target, key, key_len) &&
-                     ctl_first_reader(ctl, ctl->c->ring, key, key_len, a->target) == a->source);
-  pthread_mutex_unlock(&ctl->c->mu);
-  return keep;
+  return (bool)(a->v->next && ring_has(a->v->next, a->target, key, key_len) &&
+                ctl_first_reader(a->v, a->v->ring, key, key_len, a->target) == a->source);
 }
+
+typedef struct {
+  const cluster_view *v;
+  int source;
+} purge_arg;
 
 static bool purge_filter(controller *ctl, const char *key, size_t key_len, void *arg) {
-  int source = *(int *)arg;
-  pthread_mutex_lock(&ctl->c->mu);
-  bool drop = (bool)(ctl->c->prev && ring_has(ctl->c->prev, source, key, key_len) &&
-                     !ring_has(ctl->c->ring, source, key, key_len));
-  pthread_mutex_unlock(&ctl->c->mu);
-  return drop;
+  (void)ctl;
+  purge_arg *a = arg;
+  return (bool)(a->v->prev && ring_has(a->v->prev, a->source, key, key_len) &&
+                !ring_has(a->v->ring, a->source, key, key_len));
 }
 
-static void ctl_abort_join(controller *ctl, int target, bool retry) {
-  (void)ctl_save_migration(ctl, MIG_ABORT, target);
+static void abort_join(controller *ctl, int target, bool retry) {
+  (void)cluster_set_phase(ctl->c, MIG_ABORT, target);
   driver_fault_point("ABORT", target);
-  pthread_mutex_lock(&ctl->c->mu);
-  ctl->c->double_write = false;
-  ring_free(ctl->c->next);
-  ctl->c->next = NULL;
-  pthread_mutex_unlock(&ctl->c->mu);
+  cluster_abort_join(ctl->c, target);
   // Requests that write to the target finish before it goes.
   (void)cluster_drain(ctl->c, DRAIN_TIMEOUT_MS);
   (void)driver_stop(target);
-  pthread_mutex_lock(&ctl->c->mu);
-  memset(&ctl->c->nodes[target], 0, sizeof(ctl->c->nodes[target]));
-  pthread_mutex_unlock(&ctl->c->mu);
-  (void)ctl_save_node(ctl, target);
+  (void)cluster_drop_node(ctl->c, target);
   ctl_set_purge_all(ctl, false);
-  (void)ctl_save_migration(ctl, MIG_IDLE, 0);
+  (void)cluster_set_phase(ctl->c, MIG_IDLE, 0);
   LOGF(ctl, LOG_WARN, "migration: join of node %d aborted", target);
   if (retry) {
     // The next loop runs it again once every node is ACTIVE (a dead source is respawned first).
-    pthread_mutex_lock(&ctl->c->mu);
-    ctl->c->add_requested = true;
-    pthread_mutex_unlock(&ctl->c->mu);
+    (void)cluster_request_add(ctl->c);
   }
 }
 
 /** COPY: double-write on, then copy older rows of moving keys to the target. Returns 0 or -1. */
 static int copy_phase(controller *ctl, int target) {
-  pthread_mutex_lock(&ctl->c->mu);
-  ring *next = cluster_build_ring(ctl->c, target);
-  ring_free(ctl->c->next);
-  ctl->c->next = next;
-  ctl->c->double_write = next != NULL;
-  ctl->c->double_write_failed = false;
-  char addr[DRIVER_ADDR_LEN];
-  memcpy(addr, ctl->c->nodes[target].addr, sizeof(addr));
-  pthread_mutex_unlock(&ctl->c->mu);
-  if (!next) {
+  if (cluster_begin_copy(ctl->c, target) != 0) {
     return -1;
   }
   driver_fault_point("COPY", target);
@@ -71,17 +55,17 @@ static int copy_phase(controller *ctl, int target) {
     return -1;
   }
   ctl_set_purge_all(ctl, true);
-  static node_ref sources[CLUSTER_MAX_NODES];
-  size_t n = ctl_snapshot(ctl, node_serves_reads, sources);
+  static cluster_view v;
+  cluster_snapshot(ctl->c, &v);
+  const char *addr = v.nodes[target].addr;
   int rc = 0;
-  for (size_t i = 0; i != n && rc == 0; i++) {
-    join_arg a = {sources[i].id, target};
-    rc = ctl_copy_rows(ctl, sources[i].addr, copy_filter, &a, addr, "/_internal/batch");
+  for (int src = 1; src <= CLUSTER_MAX_NODES && rc == 0; src++) {
+    if (v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state)) {
+      join_arg a = {&v, src, target};
+      rc = ctl_copy_rows(ctl, v.nodes[src].addr, copy_filter, &a, addr, "/_internal/batch");
+    }
   }
-  pthread_mutex_lock(&ctl->c->mu);
-  bool lost_write = ctl->c->double_write_failed;
-  pthread_mutex_unlock(&ctl->c->mu);
-  if (rc == 0 && (lost_write || !ctl_probe_health(ctl, addr))) {
+  if (rc == 0 && (cluster_copy_lost_write(ctl->c) || !ctl_probe_health(ctl, addr))) {
     rc = -1;
   }
   // Copied rows must be durable on the target before PURGE deletes them from the old owners.
@@ -94,40 +78,18 @@ static int copy_phase(controller *ctl, int target) {
   return rc;
 }
 
-/** FLIP: the ring with the target owns keys now. */
-static void flip(controller *ctl, int target) {
-  pthread_mutex_lock(&ctl->c->mu);
-  cnode *t = &ctl->c->nodes[target];
-  t->in_ring = true;
-  if (t->sm.state == NODE_SYNCING) {
-    t->sm = node_step(t->sm, NODE_EV_SYNC_DONE, ctl->cfg->probe_fails).next;
-  }
-  ring *next = ctl->c->next ? ctl->c->next : cluster_build_ring(ctl->c, 0);
-  ctl->c->next = NULL;
-  if (!ctl->c->prev) {
-    t->in_ring = false;
-    ctl->c->prev = cluster_build_ring(ctl->c, 0);
-    t->in_ring = true;
-  }
-  ring_free(ctl->c->ring);
-  ctl->c->ring = next;
-  ctl->c->double_write = false;
-  pthread_mutex_unlock(&ctl->c->mu);
-  (void)ctl_save_node(ctl, target);
-}
-
 /** PURGE: delete from each old node the keys it no longer holds. Returns 0 or -1. */
 static int purge_phase(controller *ctl, int target) {
   driver_fault_point("PURGE", target);
-  static node_ref olds[CLUSTER_MAX_NODES];
-  size_t n = ctl_snapshot(ctl, node_serves_reads, olds);
+  static cluster_view v;
+  cluster_snapshot(ctl->c, &v);
   int rc = 0;
-  for (size_t i = 0; i != n && rc == 0; i++) {
-    if (olds[i].id == target) {
-      continue;
+  for (int src = 1; src <= CLUSTER_MAX_NODES && rc == 0; src++) {
+    if (src != target && v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state)) {
+      purge_arg a = {&v, src};
+      rc = ctl_copy_rows(ctl, v.nodes[src].addr, purge_filter, &a, v.nodes[src].addr,
+                         "/_internal/delete-batch");
     }
-    rc = ctl_copy_rows(ctl, olds[i].addr, purge_filter, &olds[i].id, olds[i].addr,
-                       "/_internal/delete-batch");
   }
   if (rc == 0) {
     ctl_set_purge_all(ctl, false);
@@ -140,7 +102,7 @@ void ctl_finish_join(controller *ctl, mig_phase from, int target) {
   while (phase != MIG_IDLE) {
     if (phase == MIG_FLIP) {
       driver_fault_point("FLIP", target);
-      flip(ctl, target);
+      cluster_flip(ctl->c, target);
       phase = mig_step(phase, MIG_EV_FLIP_DONE).next;
     } else if (phase == MIG_DRAIN) {
       driver_fault_point("DRAIN", target);
@@ -154,68 +116,46 @@ void ctl_finish_join(controller *ctl, mig_phase from, int target) {
       }
       phase = mig_step(phase, MIG_EV_PURGE_DONE).next;
     } else {
-      break;
+      return;
     }
-    if (ctl_save_migration(ctl, phase, phase == MIG_IDLE ? 0 : target) != 0) {
+    if (cluster_set_phase(ctl->c, phase, phase == MIG_IDLE ? 0 : target) != 0) {
       return;
     }
   }
-  pthread_mutex_lock(&ctl->c->mu);
-  ring_free(ctl->c->prev);
-  ctl->c->prev = NULL;
-  pthread_mutex_unlock(&ctl->c->mu);
   ctl->last_scale_ms = ctl_mono_ms();
   LOGF(ctl, LOG_INFO, "migration: node %d joined", target);
 }
 
 void ctl_join(controller *ctl, bool asked) {
-  pthread_mutex_lock(&ctl->c->mu);
-  int target = 1;
-  for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
-    if (ctl->c->nodes[id].exists) {
-      target = id + 1;
-    }
-  }
-  ctl->c->add_requested = false;
-  pthread_mutex_unlock(&ctl->c->mu);
-  if (target > CLUSTER_MAX_NODES || ctl_save_migration(ctl, MIG_SPAWN, target) != 0) {
+  int target = cluster_begin_join(ctl->c);
+  if (target < 0) {
     return;
   }
   driver_fault_point("SPAWN", target);
-  pthread_mutex_lock(&ctl->c->mu);
-  ctl->c->nodes[target] = (cnode){.exists = true, .sm = {NODE_SPAWNING, 0, false}};
-  pthread_mutex_unlock(&ctl->c->mu);
-  (void)ctl_save_node(ctl, target);
+  (void)cluster_put_node(ctl->c, target, "", (node_sm){NODE_SPAWNING, 0, false}, false);
   char raw[DRIVER_ADDR_LEN];
   char addr[DRIVER_ADDR_LEN];
   if (driver_spawn(target, raw) != 0 || ctl_resolve(raw, addr) != 0 ||
       !ctl_wait_healthy(ctl, addr)) {
     LOGF(ctl, LOG_ERROR, "migration: spawn of node %d failed", target);
-    ctl_abort_join(ctl, target, asked);
+    abort_join(ctl, target, asked);
     return;
   }
-  pthread_mutex_lock(&ctl->c->mu);
-  memcpy(ctl->c->nodes[target].addr, addr, sizeof(addr));
-  pthread_mutex_unlock(&ctl->c->mu);
-  (void)ctl_node_event(ctl, target, NODE_EV_SPAWN_OK);
-  if (ctl_save_migration(ctl, MIG_COPY, target) != 0 || copy_phase(ctl, target) != 0 ||
-      ctl_save_migration(ctl, MIG_FLIP, target) != 0) {
-    ctl_abort_join(ctl, target, asked);
+  (void)cluster_spawned(ctl->c, target, addr);
+  if (cluster_set_phase(ctl->c, MIG_COPY, target) != 0 || copy_phase(ctl, target) != 0 ||
+      cluster_set_phase(ctl->c, MIG_FLIP, target) != 0) {
+    abort_join(ctl, target, asked);
     return;
   }
   ctl_finish_join(ctl, MIG_FLIP, target);
 }
 
 void ctl_restart_migration(controller *ctl, stored_migration mig) {
-  cluster *c = ctl->c;
   mig_result r = mig_step(mig.phase, MIG_EV_RESTART);
   if ((r.actions & MIG_ACT_ABORT) != 0) {
     LOGF(ctl, LOG_WARN, "start: aborting the join of node %d left in %s", mig.target,
          mig_phase_name(mig.phase));
-    pthread_mutex_lock(&c->mu);
-    c->nodes[mig.target].in_ring = false;
-    pthread_mutex_unlock(&c->mu);
-    ctl_abort_join(ctl, mig.target, false);
+    abort_join(ctl, mig.target, false);
     return;
   }
   if ((r.actions & (MIG_ACT_FLIP | MIG_ACT_DRAIN | MIG_ACT_PURGE)) == 0) {
@@ -223,22 +163,10 @@ void ctl_restart_migration(controller *ctl, stored_migration mig) {
   }
   LOGF(ctl, LOG_INFO, "start: finishing the join of node %d from %s", mig.target,
        mig_phase_name(mig.phase));
-  pthread_mutex_lock(&c->mu);
-  cnode *t = &c->nodes[mig.target];
-  t->in_ring = false;
-  c->prev = cluster_build_ring(c, 0);
-  t->in_ring = true;
-  ring_free(c->ring);
-  c->ring = cluster_build_ring(c, 0);
-  c->phase = mig.phase;
-  c->target = mig.target;
-  pthread_mutex_unlock(&c->mu);
-  if (mig.phase == MIG_FLIP) {
-    flip(ctl, mig.target);
-    if (ctl_save_migration(ctl, MIG_DRAIN, mig.target) == 0) {
-      ctl_finish_join(ctl, MIG_DRAIN, mig.target);
-    }
-  } else {
-    ctl_finish_join(ctl, mig.phase, mig.target);
+  // The stored nodes give the ring with the target; the ring before the join is rebuilt as prev.
+  cluster_flip(ctl->c, mig.target);
+  mig_phase from = mig.phase == MIG_FLIP ? MIG_DRAIN : mig.phase;
+  if (cluster_set_phase(ctl->c, from, mig.target) == 0) {
+    ctl_finish_join(ctl, from, mig.target);
   }
 }

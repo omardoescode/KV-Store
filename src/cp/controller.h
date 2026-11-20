@@ -12,7 +12,8 @@
  */
 typedef struct controller controller;
 
-controller *controller_new(cluster *c, cp_store *store, logger log);
+/** store is the one c writes to; cfg and both must outlive the controller. */
+controller *controller_new(cluster *c, cp_store *store, const cp_config *cfg, logger log);
 
 /**
  * Rebuild the cluster from the store and the driver, spawn the initial nodes of an empty
