@@ -1,5 +1,20 @@
 # Benchmark
 
+## One-to-three-node cluster benchmark
+
+`cluster_profile.py` measures the control plane with the existing process driver. It starts one,
+two, and three storage processes, and uses k6 to measure each fixed request rate.
+
+```sh
+make bench-cluster
+python3 bench/cluster_profile.py --nodes 1,2,3 --rates 2000,4000,8000 --duration 20
+python3 bench/cluster_profile.py --help
+```
+
+Output is written to `cluster-results/<timestamp>/` and includes `summary.md`, `summary.csv`, and
+one k6 JSON summary for every node/rate combination. This benchmark requires `k6`; Docker is only
+needed for the optional production/container run.
+
 `profile.py` (Python 3, stdlib only) finds the max sustainable RPS of the server for each workload mix in `--mix` (read %, default `95,50`: 95% read / 5% write and 50% read / 50% write), and profiles the server with `perf`. Requires `k6` and, for profiles, `perf` (`kernel.perf_event_paranoid` <= 2 is enough: it records user space of the server only).
 
 ```sh
