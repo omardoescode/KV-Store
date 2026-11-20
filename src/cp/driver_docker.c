@@ -1,13 +1,13 @@
 // Node driver for production: each node is a container kv-node-<id> of KV_CP_NODE_IMAGE on the
 // Docker network KV_CP_NODE_NETWORK (default kv-net), with its data on volume kv-data-<id>.
 // Talks to the Docker Engine API over KV_CP_DOCKER_SOCK (default /var/run/docker.sock).
-#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cp/driver.h"
 #include "cp/hclient.h"
+#include "cp/resolve.h"
 #include "json/json.h"
 
 enum { DOCKER_TIMEOUT_MS = 30000, NODE_PORT = 7890 };
@@ -48,23 +48,9 @@ static int docker(const char *method, const char *path, const char *body, hclien
 
 /** Write the "ip:port" of container kv-node-<id> to addr. Returns 0 or -1. */
 static int node_addr(int id, char addr[DRIVER_ADDR_LEN]) {
-  char host[32];
-  char port[8];
-  (void)snprintf(host, sizeof(host), "kv-node-%d", id);
-  (void)snprintf(port, sizeof(port), "%d", NODE_PORT);
-  struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
-  struct addrinfo *ai = NULL;
-  if (getaddrinfo(host, port, &hints, &ai) != 0) {
-    return -1;
-  }
-  char ip[64];
-  int rc = getnameinfo(ai->ai_addr, ai->ai_addrlen, ip, sizeof(ip), NULL, 0, NI_NUMERICHOST);
-  freeaddrinfo(ai);
-  if (rc != 0) {
-    return -1;
-  }
-  (void)snprintf(addr, DRIVER_ADDR_LEN, "%s:%s", ip, port);
-  return 0;
+  char host_port[32];
+  (void)snprintf(host_port, sizeof(host_port), "kv-node-%d:%d", id, NODE_PORT);
+  return resolve_addr(host_port, addr);
 }
 
 /** Build the create body of node id. Returns a malloc string, or NULL. */
