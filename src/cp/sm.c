@@ -54,6 +54,11 @@ static node_result step_live(int probe_fails, node_sm cur, node_event ev) {
     }
     cur.state = NODE_SUSPECT;
     return probe_failed(cur, probe_fails);
+  case NODE_EV_MISSED_WRITE:
+    if (cur.state == NODE_ACTIVE || cur.state == NODE_SUSPECT) {
+      cur.state = NODE_REPAIRING;
+    }
+    return (node_result){cur, 0};
   case NODE_EV_SYNC_DONE:
     if (cur.state != NODE_SYNCING) {
       return node_unchanged(cur);
