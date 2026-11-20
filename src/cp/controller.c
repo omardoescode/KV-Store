@@ -56,10 +56,11 @@ static void heal(controller *ctl) {
       ctl_heal(ctl, id, NODE_DEAD);
     }
   }
-  // A node left REPAIRING (repair failed, or cp restarted) gets its repair again.
+  // A node left REPAIRING (it missed a write, its repair failed, or cp restarted) gets its
+  // repair once it answers probes.
   cluster_snapshot(ctl->c, &v);
   for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
-    if (v.nodes[id].exists && v.nodes[id].sm.state == NODE_REPAIRING) {
+    if (v.nodes[id].exists && v.nodes[id].sm.state == NODE_REPAIRING && v.nodes[id].sm.fails == 0) {
       ctl_heal(ctl, id, NODE_REPAIRING);
     }
   }

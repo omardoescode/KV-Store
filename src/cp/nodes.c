@@ -97,6 +97,7 @@ static void pause_purge(controller *ctl, bool paused) {
 /** Copy the keys of node id from the replicas that serve reads. Returns 0 or -1. */
 static int repair(controller *ctl, int id) {
   driver_fault_point("REPAIR", id);
+  (void)cluster_take_missed_write(ctl->c, id);
   // Writes that started before the node was REPAIRING did not go to it.
   if (cluster_drain(ctl->c, DRAIN_TIMEOUT_MS) != 0) {
     return -1;
@@ -116,6 +117,10 @@ static int repair(controller *ctl, int id) {
     }
   }
   pause_purge(ctl, false);
+  // A write it missed during the copy may come after the copy of its key.
+  if (rc == 0 && cluster_take_missed_write(ctl->c, id)) {
+    rc = -1;
+  }
   return rc;
 }
 

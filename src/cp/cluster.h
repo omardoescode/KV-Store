@@ -24,6 +24,8 @@ enum { CLUSTER_MAX_NODES = 1024 };
 typedef struct {
   int id;
   char addr[DRIVER_ADDR_LEN];
+  /** Writes: the replica serves reads, so its ack counts toward acks. */
+  bool counts;
 } plan_target;
 
 /** Where one request goes. */
@@ -33,6 +35,8 @@ typedef struct {
   plan_target targets[RING_MAX_REPLICAS + 1];
   /** Writes: how many of targets are replicas whose response counts; the target comes after. */
   size_t replicas;
+  /** Writes: the acks of counting replicas the write needs, max(1, RF - 1). */
+  size_t acks;
   uint64_t version;
   uint64_t epoch;
 } plan;
@@ -69,7 +73,10 @@ typedef struct {
 cluster *cluster_new(const cp_config *cfg, cp_store *store, logger log);
 void cluster_free(cluster *c);
 
-/** Plan a write of key: fails (-1) if no replica takes writes. Takes a ticket on success. */
+/**
+ * Plan a write of key: fails (-1) if fewer replicas than acks serve reads. Takes a ticket on
+ * success.
+ */
 int cluster_plan_write(cluster *c, const char *key, size_t key_len, plan *out);
 /** Plan a read of key: fails (-1) if no replica serves reads. Takes a ticket on success. */
 int cluster_plan_read(cluster *c, const char *key, size_t key_len, plan *out);
@@ -77,6 +84,11 @@ int cluster_plan_read(cluster *c, const char *key, size_t key_len, plan *out);
 void cluster_done(cluster *c, uint64_t epoch);
 /** Note a failed forward to node id; join_target: it was the double-write to the target. */
 void cluster_forward_failed(cluster *c, int id, bool join_target);
+/**
+ * A write was acked without replica id: it stops serving reads until a repair. The next
+ * cluster_node_event of id writes the change to the store.
+ */
+void cluster_missed_write(cluster *c, int id);
 
 /** POST /_cp/nodes: ask the controller for one more node. False at KV_CP_MAX_NODES. */
 bool cluster_request_add(cluster *c);
@@ -101,6 +113,8 @@ unsigned cluster_node_event(cluster *c, int id, node_event ev);
 unsigned cluster_spawned(cluster *c, int id, const char *addr);
 /** Return and clear whether a forward to node id failed since the last call. */
 bool cluster_take_forward_error(cluster *c, int id);
+/** Return and clear whether node id missed a write since the last call. */
+bool cluster_take_missed_write(cluster *c, int id);
 /** Move the stored version mark ahead when the versions in use come near it. */
 void cluster_reserve_versions(cluster *c);
 
