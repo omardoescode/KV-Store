@@ -87,6 +87,12 @@ int http_default_threads(void);
  */
 int http_listen_and_serve(http_server *s, const char *addr, int threads);
 
+/**
+ * Percent-encode s into out, which has room for len * 3 bytes; unreserved characters stay. Returns
+ * the length written, without a terminator.
+ */
+size_t http_percent_encode(char *out, const char *s, size_t len);
+
 /** Run fn on each worker thread when its loop stops, while the loop still exists. */
 void http_on_worker_exit(http_server *s, void (*fn)(void));
 

@@ -15,8 +15,7 @@ typedef struct {
 struct ring {
   point *points;
   size_t count;
-  // Distinct node count.
-  size_t nodes;
+  size_t node_count;
   int replicas;
 };
 
@@ -49,7 +48,7 @@ ring *ring_new(const int *ids, size_t n, ring_params params) {
   if (!r) {
     return NULL;
   }
-  r->nodes = n;
+  r->node_count = n;
   r->replicas = params.replicas < RING_MAX_REPLICAS ? params.replicas : RING_MAX_REPLICAS;
   r->count = n * (size_t)vnodes;
   if (r->count == 0) {
@@ -85,7 +84,6 @@ size_t ring_prefs(const ring *r, const char *key, size_t key_len, int *out) {
     return 0;
   }
   uint64_t pos = position(key, key_len);
-  // The first point at or after pos, wrapping to 0.
   size_t lo = 0;
   size_t hi = r->count;
   while (lo < hi) {
@@ -96,7 +94,7 @@ size_t ring_prefs(const ring *r, const char *key, size_t key_len, int *out) {
       hi = mid;
     }
   }
-  size_t want = (size_t)rf < r->nodes ? (size_t)rf : r->nodes;
+  size_t want = (size_t)rf < r->node_count ? (size_t)rf : r->node_count;
   size_t found = 0;
   for (size_t step = 0; step != r->count && found != want; step++) {
     int id = r->points[(lo + step) % r->count].id;

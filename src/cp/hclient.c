@@ -15,7 +15,7 @@
 
 #include "picohttpparser.h"
 
-static int64_t now_ms(void) {
+static int64_t mono_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return ((int64_t)ts.tv_sec * 1000) + (ts.tv_nsec / 1000000);
@@ -24,7 +24,7 @@ static int64_t now_ms(void) {
 /** Wait until fd is ready for events or the deadline passes. Returns 0, or -1 on timeout. */
 static int wait_fd(int fd, short events, int64_t deadline) {
   for (;;) {
-    int64_t left = deadline - now_ms();
+    int64_t left = deadline - mono_ms();
     if (left <= 0) {
       return -1;
     }
@@ -178,7 +178,7 @@ static int parse(char *raw, size_t raw_len, hclient_resp *out) {
 }
 
 int hclient_do(const char *addr, const hclient_req *req, hclient_resp *out) {
-  int64_t deadline = now_ms() + req->timeout_ms;
+  int64_t deadline = mono_ms() + req->timeout_ms;
   int fd = dial(addr, deadline);
   if (fd < 0) {
     return -1;
