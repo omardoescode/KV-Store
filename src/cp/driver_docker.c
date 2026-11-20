@@ -1,6 +1,7 @@
 // Node driver for production: each node is a container kv-node-<id> of KV_CP_NODE_IMAGE on the
 // Docker network KV_CP_NODE_NETWORK (default kv-net), with its data on volume kv-data-<id>.
 // Talks to the Docker Engine API over KV_CP_DOCKER_SOCK (default /var/run/docker.sock).
+#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,6 +49,27 @@ static int docker(const char *method, const char *path, const char *body, hclien
   return resp.status;
 }
 
+/** Write the "ip:port" of container kv-node-<id> to addr. Returns 0 or -1. */
+static int node_addr(int id, char addr[DRIVER_ADDR_LEN]) {
+  char host[32];
+  char port[8];
+  (void)snprintf(host, sizeof(host), "kv-node-%d", id);
+  (void)snprintf(port, sizeof(port), "%d", NODE_PORT);
+  struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
+  struct addrinfo *ai = NULL;
+  if (getaddrinfo(host, port, &hints, &ai) != 0) {
+    return -1;
+  }
+  char ip[64];
+  int rc = getnameinfo(ai->ai_addr, ai->ai_addrlen, ip, sizeof(ip), NULL, 0, NI_NUMERICHOST);
+  freeaddrinfo(ai);
+  if (rc != 0) {
+    return -1;
+  }
+  (void)snprintf(addr, DRIVER_ADDR_LEN, "%s:%s", ip, port);
+  return 0;
+}
+
 /** Build the create body of node id. Returns a malloc string, or NULL. */
 static char *create_body(int id) {
   json_builder *b = json_builder_new();
@@ -85,7 +107,6 @@ static char *create_body(int id) {
 }
 
 int driver_spawn(int id, char addr[DRIVER_ADDR_LEN]) {
-  (void)snprintf(addr, DRIVER_ADDR_LEN, "kv-node-%d:%d", id, NODE_PORT);
   char path[128];
   (void)snprintf(path, sizeof(path), "/containers/kv-node-%d/json", id);
   hclient_resp resp = {0, NULL, 0};
@@ -95,7 +116,7 @@ int driver_spawn(int id, char addr[DRIVER_ADDR_LEN]) {
     json_doc_free(doc);
     free(resp.body);
     if (running) {
-      return 0;
+      return node_addr(id, addr);
     }
     (void)snprintf(path, sizeof(path), "/containers/kv-node-%d?force=true", id);
     (void)docker("DELETE", path, NULL, NULL);
@@ -117,7 +138,7 @@ int driver_spawn(int id, char addr[DRIVER_ADDR_LEN]) {
     return -1;
   }
   dlog.log(dlog.ctx, LOG_INFO, "driver: kv-node-%d started", id);
-  return 0;
+  return node_addr(id, addr);
 }
 
 int driver_stop(int id) {
@@ -141,9 +162,8 @@ int driver_list(driver_node *out, size_t max) {
   for (size_t i = 0; i != json_len(arr) && n != max; i++) {
     const char *id = json_str(json_get(json_get(json_at(arr, i), "Labels"), "kv.id"), NULL);
     long v = id ? strtol(id, NULL, 10) : 0;
-    if (v > 0 && v <= 1024) {
+    if (v > 0 && v <= 1024 && node_addr((int)v, out[n].addr) == 0) {
       out[n].id = (int)v;
-      (void)snprintf(out[n].addr, DRIVER_ADDR_LEN, "kv-node-%d:%d", out[n].id, NODE_PORT);
       n++;
     }
   }

@@ -3,11 +3,12 @@
 #include <stdio.h>
 #include <string.h>
 
+enum { START_SPAWN_TRIES = 5 };
+
 static int spawn_initial(controller *ctl, int id, int *failures) {
   for (;;) {
-    char raw[DRIVER_ADDR_LEN];
     char addr[DRIVER_ADDR_LEN];
-    if (driver_spawn(id, raw) == 0 && ctl_resolve(raw, addr) == 0 && ctl_wait_healthy(addr)) {
+    if (ctl_spawn_ready(id, addr) == 0) {
       return cluster_put_node(ctl->c, id, addr, (node_sm){NODE_ACTIVE, 0, true}, true);
     }
     if (++*failures >= START_SPAWN_TRIES) {
@@ -27,7 +28,8 @@ static void load_nodes(controller *ctl, const stored_node *stored, int n, const 
     bool running = false;
     for (int j = 0; j != n_live; j++) {
       if (live[j].id == s.id) {
-        running = ctl_resolve(live[j].addr, s.addr) == 0;
+        running = true;
+        memcpy(s.addr, live[j].addr, sizeof(s.addr));
       }
     }
     if (!running || s.sm.state == NODE_SPAWNING) {
@@ -43,10 +45,7 @@ static void load_nodes(controller *ctl, const stored_node *stored, int n, const 
 /** Adopt running nodes as the ring when cp has no state (cp.db was lost). */
 static void adopt_nodes(controller *ctl, const driver_node *live, int n_live) {
   for (int i = 0; i != n_live; i++) {
-    char addr[DRIVER_ADDR_LEN];
-    if (ctl_resolve(live[i].addr, addr) == 0) {
-      (void)cluster_put_node(ctl->c, live[i].id, addr, (node_sm){NODE_ACTIVE, 0, true}, true);
-    }
+    (void)cluster_put_node(ctl->c, live[i].id, live[i].addr, (node_sm){NODE_ACTIVE, 0, true}, true);
   }
 }
 

@@ -108,9 +108,8 @@ void ctl_join(controller *ctl, bool asked) {
   }
   driver_fault_point("SPAWN", target);
   (void)cluster_put_node(ctl->c, target, "", (node_sm){NODE_SPAWNING, 0, false}, false);
-  char raw[DRIVER_ADDR_LEN];
   char addr[DRIVER_ADDR_LEN];
-  if (driver_spawn(target, raw) != 0 || ctl_resolve(raw, addr) != 0 || !ctl_wait_healthy(addr)) {
+  if (ctl_spawn_ready(target, addr) != 0) {
     LOGF(ctl, LOG_ERROR, "migration: spawn of node %d failed", target);
     abort_join(ctl, target, asked);
     return;
