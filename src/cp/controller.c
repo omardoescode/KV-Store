@@ -177,6 +177,9 @@ void controller_free(controller *ctl) {
     pthread_mutex_unlock(&ctl->mu);
     pthread_join(ctl->thread, NULL);
   }
+  if (ctl->up) {
+    (void)cp_store_put_running(ctl->store, false);
+  }
   pthread_mutex_destroy(&ctl->mu);
   pthread_cond_destroy(&ctl->wake);
   free(ctl);

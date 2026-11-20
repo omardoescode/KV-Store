@@ -190,6 +190,26 @@ static void test_new_cp_aborts_a_join_stored_in_copy(void) {
   printf("  test_new_cp_aborts_a_join_stored_in_copy OK\n");
 }
 
+static void test_new_cp_after_a_crash_makes_replicas_agree(void) {
+  world *w = start(2);
+  fake_put(2, "k0", "acked");
+  fake_put(3, "k0", "acked");
+  fake_put(2, "k0", "in flight");
+  world *crashed = w;
+  w = calloc(1, sizeof(*w));
+  assert(w);
+  w->cfg = crashed->cfg;
+  w->store = crashed->store;
+  boot(w);
+  assert(is(fake_get(2, "k0"), "in flight") && is(fake_get(3, "k0"), "in flight"));
+  assert(!any_purge_paused());
+  controller_free(w->ctl);
+  cluster_free(w->c);
+  free(w);
+  stop(crashed);
+  printf("  test_new_cp_after_a_crash_makes_replicas_agree OK\n");
+}
+
 int main(void) {
   printf("controller tests:\n");
   test_join_moves_keys_to_the_new_node();
@@ -198,6 +218,7 @@ int main(void) {
   test_join_aborts_before_flip_then_retries();
   test_new_cp_finishes_a_join_stored_in_flip();
   test_new_cp_aborts_a_join_stored_in_copy();
+  test_new_cp_after_a_crash_makes_replicas_agree();
   printf("all controller tests passed\n");
   return 0;
 }

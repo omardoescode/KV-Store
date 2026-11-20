@@ -22,8 +22,9 @@ CP_BIN = os.path.join(ROOT, 'build', 'kv-cp-proc')
 NODE_BIN = os.path.join(ROOT, 'build', 'app')
 # Command prefix for cp, e.g. valgrind (tests/memcheck.sh).
 CP_WRAPPER = os.environ.get('KV_CP_WRAPPER', '').split()
-CP_PORT = 7980
-BASE_PORT = 7990
+# Separate ports let several test runs go in parallel.
+CP_PORT = int(os.environ.get('KV_TEST_CP_PORT', 7980))
+BASE_PORT = int(os.environ.get('KV_TEST_BASE_PORT', 7990))
 
 
 def request(port, method, path, body=None, headers=None, timeout=10):

@@ -20,6 +20,8 @@ struct controller {
   pthread_cond_t wake;
   bool stop;
   bool running;
+  /** start-up is done: a stop from now on is clean. */
+  bool up;
   int64_t last_scale_ms;
   int64_t window_start_ms;
   uint64_t window_requests[CLUSTER_MAX_NODES + 1];
