@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int owner_of(const ring *r, const char *key) {
@@ -175,6 +176,53 @@ static void test_purge_drops_keys_a_node_lost(void) {
   printf("  test_purge_drops_keys_a_node_lost OK\n");
 }
 
+static bool changed(const ring_range *ranges, size_t n, const char *key) {
+  return ring_ranges_have(ranges, n, key, strlen(key));
+}
+
+static void test_diff_has_keys_whose_prefs_change(void) {
+  join_rings j = join_3_to_4();
+  ring_range *ranges = NULL;
+  size_t n = 0;
+  assert(ring_diff(j.old, j.now, &ranges, &n) == 0);
+  assert(n > 0);
+  assert(changed(ranges, n, "k2"));
+  assert(changed(ranges, n, "k7"));
+  assert(changed(ranges, n, "k6"));
+  assert(!changed(ranges, n, "k0"));
+  free(ranges);
+  ring_free(j.old);
+  ring_free(j.now);
+  printf("  test_diff_has_keys_whose_prefs_change OK\n");
+}
+
+static void test_diff_of_same_ring_is_empty(void) {
+  join_rings j = join_3_to_4();
+  ring_range *ranges = NULL;
+  size_t n = 7;
+  assert(ring_diff(j.now, j.now, &ranges, &n) == 0);
+  assert(n == 0);
+  free(ranges);
+  ring_free(j.old);
+  ring_free(j.now);
+  printf("  test_diff_of_same_ring_is_empty OK\n");
+}
+
+static void test_diff_from_empty_ring_is_whole_ring(void) {
+  int ids[] = {1};
+  ring *none = make(NULL, 0, 4, 1);
+  ring *one = make(ids, 1, 4, 1);
+  ring_range *ranges = NULL;
+  size_t n = 0;
+  assert(ring_diff(none, one, &ranges, &n) == 0);
+  assert(n == 1 && ranges[0].start == ranges[0].end);
+  assert(changed(ranges, n, "k0") && changed(ranges, n, "hello"));
+  free(ranges);
+  ring_free(none);
+  ring_free(one);
+  printf("  test_diff_from_empty_ring_is_whole_ring OK\n");
+}
+
 int main(void) {
   printf("ring tests:\n");
   test_fixed_owners();
@@ -187,6 +235,9 @@ int main(void) {
   test_dead_reader_is_skipped();
   test_repair_sends_each_key_of_the_node_from_one_reader();
   test_purge_drops_keys_a_node_lost();
+  test_diff_has_keys_whose_prefs_change();
+  test_diff_of_same_ring_is_empty();
+  test_diff_from_empty_ring_is_whole_ring();
   printf("all ring tests passed\n");
   return 0;
 }

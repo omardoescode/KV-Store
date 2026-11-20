@@ -78,12 +78,11 @@ void ring_free(ring *r) {
   }
 }
 
-size_t ring_prefs(const ring *r, const char *key, size_t key_len, int *out) {
+static size_t prefs_at(const ring *r, uint64_t pos, int *out) {
   int rf = r->replicas;
   if (r->count == 0 || rf <= 0) {
     return 0;
   }
-  uint64_t pos = position(key, key_len);
   size_t lo = 0;
   size_t hi = r->count;
   while (lo < hi) {
@@ -107,6 +106,94 @@ size_t ring_prefs(const ring *r, const char *key, size_t key_len, int *out) {
     }
   }
   return found;
+}
+
+size_t ring_prefs(const ring *r, const char *key, size_t key_len, int *out) {
+  return prefs_at(r, position(key, key_len), out);
+}
+
+static int by_value(const void *lhs, const void *rhs) {
+  uint64_t a = *(const uint64_t *)lhs;
+  uint64_t b = *(const uint64_t *)rhs;
+  return (a > b) - (a < b);
+}
+
+static bool same_prefs(const ring *from, const ring *to, uint64_t pos) {
+  int a[RING_MAX_REPLICAS];
+  int b[RING_MAX_REPLICAS];
+  size_t na = prefs_at(from, pos, a);
+  size_t nb = prefs_at(to, pos, b);
+  return (bool)(na == nb && memcmp(a, b, na * sizeof(*a)) == 0);
+}
+
+int ring_diff(const ring *from, const ring *to, ring_range **out, size_t *n) {
+  *out = NULL;
+  *n = 0;
+  size_t total = from->count + to->count;
+  if (total == 0) {
+    return 0;
+  }
+  // Between two neighbouring points of either ring both preference lists stay the same.
+  uint64_t *cuts = malloc(total * sizeof(*cuts));
+  ring_range *ranges = malloc(total * sizeof(*ranges));
+  if (!cuts || !ranges) {
+    free(cuts);
+    free(ranges);
+    return -1;
+  }
+  size_t m = 0;
+  for (size_t i = 0; i != from->count; i++) {
+    cuts[m++] = from->points[i].pos;
+  }
+  for (size_t i = 0; i != to->count; i++) {
+    cuts[m++] = to->points[i].pos;
+  }
+  qsort(cuts, m, sizeof(*cuts), by_value);
+  size_t unique = 1;
+  for (size_t i = 1; i != m; i++) {
+    if (cuts[i] != cuts[unique - 1]) {
+      cuts[unique++] = cuts[i];
+    }
+  }
+  size_t count = 0;
+  for (size_t i = 0; i != unique; i++) {
+    if (same_prefs(from, to, cuts[i])) {
+      continue;
+    }
+    uint64_t start = cuts[i == 0 ? unique - 1 : i - 1];
+    if (count != 0 && ranges[count - 1].end == start) {
+      ranges[count - 1].end = cuts[i];
+    } else {
+      ranges[count++] = (ring_range){start, cuts[i]};
+    }
+  }
+  if (count > 1 && ranges[count - 1].end == ranges[0].start) {
+    ranges[0].start = ranges[count - 1].start;
+    count--;
+  }
+  free(cuts);
+  if (count == 0) {
+    free(ranges);
+    ranges = NULL;
+  }
+  *out = ranges;
+  *n = count;
+  return 0;
+}
+
+bool ring_ranges_have(const ring_range *ranges, size_t n, const char *key, size_t key_len) {
+  uint64_t pos = position(key, key_len);
+  for (size_t i = 0; i != n; i++) {
+    ring_range r = ranges[i];
+    if (r.start < r.end) {
+      if (pos > r.start && pos <= r.end) {
+        return true;
+      }
+    } else if (pos > r.start || pos <= r.end) {
+      return true;
+    }
+  }
+  return false;
 }
 
 int ring_has(const ring *r, int id, const char *key, size_t key_len) {
