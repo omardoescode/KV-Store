@@ -10,6 +10,7 @@
 #include "cp/cluster.h"
 #include "cp/controller.h"
 #include "cp/driver.h"
+#include "cp/node_client.h"
 #include "cp/router.h"
 #include "cp/store.h"
 #include "http/http.h"
@@ -64,6 +65,7 @@ int main(void) {
   if (!c || driver_init(&cfg, log) != 0) {
     goto out;
   }
+  node_client_init(&cfg);
   ctl = controller_new(c, store, &cfg, log);
   if (!ctl || controller_start_up(ctl) != 0 || controller_run(ctl) != 0) {
     goto out;

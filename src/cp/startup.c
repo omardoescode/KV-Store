@@ -7,7 +7,7 @@ static int spawn_initial(controller *ctl, int id, int *failures) {
   for (;;) {
     char raw[DRIVER_ADDR_LEN];
     char addr[DRIVER_ADDR_LEN];
-    if (driver_spawn(id, raw) == 0 && ctl_resolve(raw, addr) == 0 && ctl_wait_healthy(ctl, addr)) {
+    if (driver_spawn(id, raw) == 0 && ctl_resolve(raw, addr) == 0 && ctl_wait_healthy(addr)) {
       return cluster_put_node(ctl->c, id, addr, (node_sm){NODE_ACTIVE, 0, true}, true);
     }
     if (++*failures >= START_SPAWN_TRIES) {

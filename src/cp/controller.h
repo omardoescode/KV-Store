@@ -22,6 +22,12 @@ controller *controller_new(cluster *c, cp_store *store, const cp_config *cfg, lo
  */
 int controller_start_up(controller *ctl);
 
+/**
+ * Run one round of the controller loop now: probe nodes, heal dead ones, then continue a PURGE
+ * or start a join if one is due. Do not call while the thread runs.
+ */
+void controller_tick(controller *ctl);
+
 /** Start the controller thread. Returns 0 or -1. */
 int controller_run(controller *ctl);
 
