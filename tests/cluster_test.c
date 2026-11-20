@@ -17,18 +17,24 @@ static void quiet(void *ctx, log_level level, const char *fmt, ...) {
 static const cp_config cfg = {
     .max_nodes = 4,
     .replicas = 1,
+    .read_quorum = 1,
+    .write_quorum = 1,
     .vnodes = 128,
     .probe_fails = 2,
 };
 static const cp_config cfg_rf2 = {
     .max_nodes = 4,
     .replicas = 2,
+    .read_quorum = 1,
+    .write_quorum = 1,
     .vnodes = 128,
     .probe_fails = 2,
 };
 static const cp_config cfg_rf3 = {
     .max_nodes = 4,
     .replicas = 3,
+    .read_quorum = 2,
+    .write_quorum = 2,
     .vnodes = 128,
     .probe_fails = 2,
 };
@@ -69,6 +75,7 @@ static void copy_to_4(cluster *c) {
   assert(cluster_begin_copy(c, 4) == 0);
 }
 
+/** Write the nodes a write goes to, or a read may ask, to out; return their count. */
 static int ids(cluster *c, const char *key, bool write, int out[3]) {
   plan p;
   int rc = write ? cluster_plan_write(c, key, strlen(key), &p)
@@ -77,10 +84,13 @@ static int ids(cluster *c, const char *key, bool write, int out[3]) {
     return 0;
   }
   cluster_done(c, p.epoch);
+  int n = 0;
   for (size_t i = 0; i != p.count; i++) {
-    out[i] = p.targets[i].id;
+    if (write || p.targets[i].reads) {
+      out[n++] = p.targets[i].id;
+    }
   }
-  return (int)p.count;
+  return n;
 }
 
 static void test_copy_writes_moving_keys_to_target(void) {
@@ -147,7 +157,7 @@ static uint64_t write_version(cluster *c, const char *key) {
     return 0;
   }
   cluster_done(c, p.epoch);
-  return p.version;
+  return p.ts;
 }
 
 static void test_versions_after_restart_are_above_the_stored_mark(void) {
@@ -169,78 +179,76 @@ static void test_versions_after_restart_are_above_the_stored_mark(void) {
   printf("  test_versions_after_restart_are_above_the_stored_mark OK\n");
 }
 
-static size_t write_acks(const cp_config *config) {
-  fixture f = three_nodes_with(config);
-  plan p;
-  assert(cluster_plan_write(f.c, "k0", 2, &p) == 0);
-  cluster_done(f.c, p.epoch);
-  done(f);
-  return p.acks;
+/** The preference list of k0 with nodes 1, 2 and 3 and 3 replicas: every node, in ring order. */
+static void k0_prefs(int out[RING_MAX_REPLICAS]) {
+  ring *r = ring_new((int[]){1, 2, 3}, 3, (ring_params){128, 3});
+  assert(r && ring_prefs(r, "k0", 2, out) == 3);
+  ring_free(r);
 }
 
-static void test_write_needs_acks_of_all_replicas_but_one(void) {
-  assert(write_acks(&cfg) == 1);
-  assert(write_acks(&cfg_rf2) == 1);
-  assert(write_acks(&cfg_rf3) == 2);
-  printf("  test_write_needs_acks_of_all_replicas_but_one OK\n");
+static void kill(fixture f, int id) {
+  char addr[16];
+  (void)snprintf(addr, sizeof(addr), "n%d", id);
+  assert(cluster_put_node(f.c, id, addr, (node_sm){NODE_DEAD, 0, true}, true) == 0);
 }
 
-static void test_missed_write_stops_reads_but_not_writes(void) {
-  fixture f = three_nodes_with(&cfg_rf2);
-  cluster_missed_write(f.c, 2);
-  int got[3];
-  assert(ids(f.c, "k0", false, got) == 1 && got[0] == 3);
-  plan p;
-  assert(cluster_plan_write(f.c, "k0", 2, &p) == 0);
-  cluster_done(f.c, p.epoch);
-  assert(p.count == 2 && p.replicas == 2 && p.acks == 1);
-  for (size_t i = 0; i != p.count; i++) {
-    assert(p.targets[i].id == 2 || p.targets[i].id == 3);
-    assert(p.targets[i].counts == (p.targets[i].id == 3));
-  }
-  cluster_view *v = malloc(sizeof(*v));
-  assert(v);
-  cluster_snapshot(f.c, v);
-  assert(v->nodes[2].sm.state == NODE_REPAIRING);
-  free(v);
-  done(f);
-  printf("  test_missed_write_stops_reads_but_not_writes OK\n");
-}
-
-static void test_write_fails_without_enough_replicas_to_ack(void) {
+static void test_write_goes_to_live_home_replicas_and_needs_w_acks(void) {
+  int prefs[RING_MAX_REPLICAS];
+  k0_prefs(prefs);
   fixture f = three_nodes_with(&cfg_rf3);
-  assert(cluster_put_node(f.c, 2, "n2", (node_sm){NODE_DEAD, 0, true}, true) == 0);
-  assert(write_version(f.c, "k0") != 0);
-  cluster_missed_write(f.c, 3);
-  assert(write_version(f.c, "k0") == 0);
+  plan p;
+  assert(cluster_plan_write(f.c, "k0", 2, &p) == 0);
+  cluster_done(f.c, p.epoch);
+  assert(p.count == 3 && p.replicas == 3 && p.write_quorum == 2 && p.read_quorum == 2);
+  assert(p.coord == prefs[0] && p.ts != 0);
+  kill(f, prefs[0]);
+  assert(cluster_plan_write(f.c, "k0", 2, &p) == 0);
+  cluster_done(f.c, p.epoch);
+  assert(p.count == 2 && p.replicas == 2 && p.coord == prefs[1]);
   done(f);
-  f = three_nodes_with(&cfg_rf2);
-  cluster_missed_write(f.c, 2);
-  assert(cluster_put_node(f.c, 3, "n3", (node_sm){NODE_DEAD, 0, true}, true) == 0);
-  assert(write_version(f.c, "k0") == 0);
-  done(f);
-  printf("  test_write_fails_without_enough_replicas_to_ack OK\n");
+  printf("  test_write_goes_to_live_home_replicas_and_needs_w_acks OK\n");
 }
 
-static void test_missed_write_is_stored_at_the_next_node_event(void) {
-  fixture f = three_nodes_with(&cfg_rf2);
-  cluster_missed_write(f.c, 2);
-  (void)cluster_node_event(f.c, 2, NODE_EV_PROBE_OK);
-  stored_node nodes[3];
-  assert(cp_store_nodes(f.store, nodes, 3) == 3);
-  assert(nodes[1].id == 2 && nodes[1].sm.state == NODE_REPAIRING);
+static void test_write_fails_with_fewer_live_home_replicas_than_w(void) {
+  fixture f = three_nodes_with(&cfg_rf3);
+  kill(f, 1);
+  kill(f, 2);
+  plan p;
+  assert(cluster_plan_write(f.c, "k0", 2, &p) == -1);
   done(f);
-  printf("  test_missed_write_is_stored_at_the_next_node_event OK\n");
+  printf("  test_write_fails_with_fewer_live_home_replicas_than_w OK\n");
 }
 
-static void test_take_missed_write_reports_each_miss_once(void) {
-  fixture f = three_nodes_with(&cfg_rf2);
-  assert(!cluster_take_missed_write(f.c, 2));
-  cluster_missed_write(f.c, 2);
-  assert(cluster_take_missed_write(f.c, 2));
-  assert(!cluster_take_missed_write(f.c, 2));
+static void test_a_respawned_replica_counts_for_writes_but_serves_no_reads(void) {
+  fixture f = three_nodes_with(&cfg_rf3);
+  kill(f, 1);
+  assert(cluster_put_node(f.c, 2, "n2", (node_sm){NODE_REPAIRING, 0, true}, true) == 0);
+  plan p;
+  assert(cluster_plan_write(f.c, "k0", 2, &p) == -1);
+  assert(cluster_plan_read(f.c, "k0", 2, &p) == -1);
+  assert(cluster_put_node(f.c, 1, "n1", (node_sm){NODE_ACTIVE, 0, true}, true) == 0);
+  assert(cluster_plan_write(f.c, "k0", 2, &p) == 0);
+  cluster_done(f.c, p.epoch);
+  assert(p.count == 3);
+  for (size_t i = 0; i != p.count; i++) {
+    assert(p.targets[i].reads == (p.targets[i].id != 2));
+  }
   done(f);
-  printf("  test_take_missed_write_reports_each_miss_once OK\n");
+  printf("  test_a_respawned_replica_counts_for_writes_but_serves_no_reads OK\n");
+}
+
+static void test_read_needs_r_replicas_that_serve_reads(void) {
+  fixture f = three_nodes_with(&cfg_rf3);
+  plan p;
+  kill(f, 3);
+  assert(cluster_plan_read(f.c, "k0", 2, &p) == 0);
+  cluster_done(f.c, p.epoch);
+  assert(p.count == 2 && p.read_quorum == 2 && p.write_quorum == 2);
+  assert(p.targets[0].reads && p.targets[1].reads);
+  kill(f, 2);
+  assert(cluster_plan_read(f.c, "k0", 2, &p) == -1);
+  done(f);
+  printf("  test_read_needs_r_replicas_that_serve_reads OK\n");
 }
 
 int main(void) {
@@ -250,11 +258,10 @@ int main(void) {
   test_abort_restores_old_plans();
   test_add_request_stops_at_max_nodes();
   test_versions_after_restart_are_above_the_stored_mark();
-  test_write_needs_acks_of_all_replicas_but_one();
-  test_missed_write_stops_reads_but_not_writes();
-  test_write_fails_without_enough_replicas_to_ack();
-  test_missed_write_is_stored_at_the_next_node_event();
-  test_take_missed_write_reports_each_miss_once();
+  test_write_goes_to_live_home_replicas_and_needs_w_acks();
+  test_write_fails_with_fewer_live_home_replicas_than_w();
+  test_a_respawned_replica_counts_for_writes_but_serves_no_reads();
+  test_read_needs_r_replicas_that_serve_reads();
   printf("all cluster tests passed\n");
   return 0;
 }

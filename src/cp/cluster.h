@@ -24,20 +24,29 @@ enum { CLUSTER_MAX_NODES = 1024 };
 typedef struct {
   int id;
   char addr[DRIVER_ADDR_LEN];
-  /** Writes: the replica serves reads, so its ack counts toward acks. */
-  bool counts;
+  /** A home replica that serves reads: a read may ask it. */
+  bool reads;
 } plan_target;
 
-/** Where one request goes. */
+/**
+ * Where one request goes. Only the N home replicas of the key count (strict quorum): a read asks
+ * read_quorum of those that serve reads; a write, and the write-back of a read, need
+ * write_quorum acks of them.
+ */
 typedef struct {
   size_t count;
-  /** Writes: every live replica, then the join target. Reads: replicas that serve reads. */
+  /** The live home replicas in preference order, then the join target. */
   plan_target targets[RING_MAX_REPLICAS + 1];
-  /** Writes: how many of targets are replicas whose response counts; the target comes after. */
+  /** How many of targets are home replicas; the join target comes after. */
   size_t replicas;
-  /** Writes: the acks of counting replicas the write needs, max(1, RF - 1). */
-  size_t acks;
-  uint64_t version;
+  /** R. */
+  size_t read_quorum;
+  /** W. */
+  size_t write_quorum;
+  /** Writes: the wall-clock timestamp, unique and increasing, and the coordinator: the first live
+   * home replica, whose clock entry the write increments. */
+  uint64_t ts;
+  int coord;
   uint64_t epoch;
 } plan;
 
@@ -74,11 +83,12 @@ cluster *cluster_new(const cp_config *cfg, cp_store *store, logger log);
 void cluster_free(cluster *c);
 
 /**
- * Plan a write of key: fails (-1) if fewer replicas than acks serve reads. Takes a ticket on
- * success.
+ * Plan a write of key: fails (-1) if fewer than W home replicas are live or fewer than R serve
+ * reads (a write reads the clocks first). Takes a ticket on success.
  */
 int cluster_plan_write(cluster *c, const char *key, size_t key_len, plan *out);
-/** Plan a read of key: fails (-1) if no replica serves reads. Takes a ticket on success. */
+/** Plan a read of key: fails (-1) if fewer than R home replicas serve reads. Takes a ticket on
+ * success. */
 int cluster_plan_read(cluster *c, const char *key, size_t key_len, plan *out);
 /** Return the ticket of a finished request. */
 void cluster_done(cluster *c, uint64_t epoch);

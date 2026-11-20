@@ -102,11 +102,11 @@ static uint64_t next_version(cluster *c) {
   return v;
 }
 
-static void add_target(plan *p, int id, const cluster_node *n) {
+static void add_target(plan *p, int id, const cluster_node *n, bool home) {
   plan_target *t = &p->targets[p->count++];
   t->id = id;
   memcpy(t->addr, n->addr, sizeof(t->addr));
-  t->counts = node_serves_reads(n->sm.state);
+  t->reads = (bool)(home && node_serves_reads(n->sm.state));
 }
 
 static void take_ticket(cluster *c, plan *p) {
@@ -114,57 +114,57 @@ static void take_ticket(cluster *c, plan *p) {
   c->inflight[c->epoch & 1U]++;
 }
 
-int cluster_plan_write(cluster *c, const char *key, size_t key_len, plan *out) {
+/**
+ * Fill out with the live home replicas of key, then the join target while it double-writes, and
+ * take a ticket. Returns 0, or -1 (no ticket) if fewer than R serve reads, or with write fewer
+ * than W are live. Call with mu held.
+ */
+static int plan_key(cluster *c, const char *key, size_t key_len, bool write, plan *out) {
   out->count = 0;
+  out->read_quorum = (size_t)c->cfg->read_quorum;
+  out->write_quorum = (size_t)c->cfg->write_quorum;
   int prefs[RING_MAX_REPLICAS];
-  pthread_mutex_lock(&c->mu);
-  out->version = next_version(c);
-  size_t n = c->ring && out->version ? ring_prefs(c->ring, key, key_len, prefs) : 0;
-  out->acks = n > 1 ? n - 1 : 1;
-  size_t counting = 0;
+  size_t n = c->ring ? ring_prefs(c->ring, key, key_len, prefs) : 0;
+  size_t readers = 0;
   for (size_t i = 0; i != n; i++) {
     const cluster_node *node = &c->nodes[prefs[i]].n;
     if (node_takes_writes(node->sm.state)) {
-      add_target(out, prefs[i], node);
-      counting += out->targets[out->count - 1].counts ? 1 : 0;
+      add_target(out, prefs[i], node, true);
+      readers += out->targets[out->count - 1].reads ? 1 : 0;
     }
   }
   out->replicas = out->count;
-  if (counting < out->acks) {
+  out->coord = out->count ? out->targets[0].id : 0;
+  if (readers < out->read_quorum || (write && out->count < out->write_quorum)) {
     out->count = 0;
-    pthread_mutex_unlock(&c->mu);
     return -1;
   }
-  for (size_t i = 0; i != out->count; i++) {
-    c->nodes[out->targets[i].id].n.requests++;
+  for (size_t i = 0, asked = 0; i != out->count; i++) {
+    if (write || (out->targets[i].reads && asked++ < out->read_quorum)) {
+      c->nodes[out->targets[i].id].n.requests++;
+    }
   }
   if (c->double_write && c->next && ring_has(c->next, c->target, key, key_len)) {
-    add_target(out, c->target, &c->nodes[c->target].n);
+    add_target(out, c->target, &c->nodes[c->target].n, false);
   }
   take_ticket(c, out);
-  pthread_mutex_unlock(&c->mu);
   return 0;
 }
 
-int cluster_plan_read(cluster *c, const char *key, size_t key_len, plan *out) {
-  out->count = 0;
-  out->version = 0;
-  int prefs[RING_MAX_REPLICAS];
+int cluster_plan_write(cluster *c, const char *key, size_t key_len, plan *out) {
   pthread_mutex_lock(&c->mu);
-  size_t n = c->ring ? ring_prefs(c->ring, key, key_len, prefs) : 0;
-  for (size_t i = 0; i != n; i++) {
-    const cluster_node *node = &c->nodes[prefs[i]].n;
-    if (node_serves_reads(node->sm.state)) {
-      add_target(out, prefs[i], node);
-    }
-  }
-  if (out->count != 0) {
-    c->nodes[out->targets[0].id].n.requests++;
-    take_ticket(c, out);
-  }
-  out->replicas = out->count;
+  out->ts = next_version(c);
+  int rc = out->ts ? plan_key(c, key, key_len, true, out) : -1;
   pthread_mutex_unlock(&c->mu);
-  return out->count ? 0 : -1;
+  return rc;
+}
+
+int cluster_plan_read(cluster *c, const char *key, size_t key_len, plan *out) {
+  pthread_mutex_lock(&c->mu);
+  out->ts = 0;
+  int rc = plan_key(c, key, key_len, false, out);
+  pthread_mutex_unlock(&c->mu);
+  return rc;
 }
 
 void cluster_done(cluster *c, uint64_t epoch) {

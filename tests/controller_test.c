@@ -22,6 +22,8 @@ static cp_config config(int replicas) {
       .initial_nodes = 3,
       .max_nodes = 8,
       .replicas = replicas,
+      .read_quorum = 1,
+      .write_quorum = 1,
       .vnodes = 128,
       .scale_window_s = 60,
       .probe_interval_ms = 1,
@@ -114,40 +116,6 @@ static void test_dead_node_is_respawned_and_repaired(void) {
   assert(!any_purge_paused());
   stop(w);
   printf("  test_dead_node_is_respawned_and_repaired OK\n");
-}
-
-static void test_node_that_missed_a_write_is_repaired(void) {
-  world *w = start(2);
-  fake_put(2, "k0", "old");
-  fake_put(3, "k0", "old");
-  fake_put(2, "k0", "new");
-  cluster_missed_write(w->c, 3);
-  plan p;
-  assert(cluster_plan_read(w->c, "k0", 2, &p) == 0 && p.count == 1 && p.targets[0].id == 2);
-  cluster_done(w->c, p.epoch);
-  controller_tick(w->ctl);
-  assert(view(w)->nodes[3].sm.state == NODE_ACTIVE);
-  assert(is(fake_get(3, "k0"), "new"));
-  assert(!any_purge_paused());
-  stop(w);
-  printf("  test_node_that_missed_a_write_is_repaired OK\n");
-}
-
-static void test_node_that_missed_a_write_and_died_is_respawned_and_repaired(void) {
-  world *w = start(2);
-  fake_put(2, "k0", "old");
-  fake_put(3, "k0", "old");
-  fake_kill(3);
-  fake_put(2, "k0", "new");
-  cluster_missed_write(w->c, 3);
-  controller_tick(w->ctl);
-  assert(view(w)->nodes[3].sm.state == NODE_REPAIRING);
-  controller_tick(w->ctl);
-  assert(view(w)->nodes[3].sm.state == NODE_ACTIVE && fake_running(3));
-  assert(is(fake_get(3, "k0"), "new"));
-  assert(!any_purge_paused());
-  stop(w);
-  printf("  test_node_that_missed_a_write_and_died_is_respawned_and_repaired OK\n");
 }
 
 static void test_purge_retries_until_old_owner_drops_moved_keys(void) {
@@ -248,8 +216,6 @@ int main(void) {
   printf("controller tests:\n");
   test_join_moves_keys_to_the_new_node();
   test_dead_node_is_respawned_and_repaired();
-  test_node_that_missed_a_write_is_repaired();
-  test_node_that_missed_a_write_and_died_is_respawned_and_repaired();
   test_purge_retries_until_old_owner_drops_moved_keys();
   test_join_aborts_before_flip_then_retries();
   test_new_cp_finishes_a_join_stored_in_flip();

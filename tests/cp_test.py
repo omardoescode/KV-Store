@@ -244,7 +244,8 @@ class ReplicationTest(ClusterTest):
 
 class FailureTest(ClusterTest):
     def test_reads_and_writes_go_on_when_a_replica_dies(self):
-        c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2).start()
+        c = self.cluster(KV_CP_INITIAL_NODES=3, KV_CP_REPLICAS=3, KV_CP_READ_QUORUM=2,
+                         KV_CP_WRITE_QUORUM=2).start()
         for i in range(20):
             c.put(f'k{i}', 'before')
         c.kill_node(1)
@@ -255,35 +256,48 @@ class FailureTest(ClusterTest):
             self.assertEqual(c.put(f'k{i}', 'after'), 200)
             self.assertEqual(c.get(f'k{i}'), 'after')
 
-    def test_stopped_replica_misses_a_write_and_is_repaired_before_reads(self):
-        c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2, KV_CP_FORWARD_TIMEOUT_MS=300,
-                         KV_CP_PROBE_FAILS=100).start()
+    def test_read_writes_the_winner_back_to_a_stale_replica(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=3, KV_CP_REPLICAS=3, KV_CP_READ_QUORUM=2,
+                         KV_CP_WRITE_QUORUM=2, KV_CP_FORWARD_TIMEOUT_MS=300,
+                         KV_CP_PROBE_FAILS=100).start(wait_nodes=3)
         self.assertEqual(c.put('k', 'old'), 200)
-        reads, stop = [], threading.Event()
-
-        def reader():
-            while not stop.is_set():
-                start = time.monotonic()
-                reads.append((start, c.get('k')))
-
-        t = threading.Thread(target=reader, daemon=True)
-        pid = c.node_pids()[1]
+        # An acked write that missed node 1: nodes 2 and 3 get a newer version of the coordinator.
+        old = json.loads(c.node_req(2, 'GET', '/_internal/get?key=k')[1])
+        coord, n = old['clock'].split(':')
+        newer = {'key': 'k', 'value': 'new', 'clock': f'{coord}:{int(n) + 1}', 'ts': old['ts'] + 1,
+                 'coord': int(coord), 'deleted': False}
+        for node in (2, 3):
+            self.assertEqual(c.node_req(node, 'POST', '/_internal/batch', {'items': [newer]})[0], 200)
+        entry = lambda node: json.loads(c.node_req(node, 'GET', '/_internal/get?key=k')[1])
+        self.assertEqual(entry(1)['value'], 'old')
+        # With node 2 stopped, the read quorum is nodes 1 (stale) and 3.
+        pid = c.node_pids()[2]
         os.kill(pid, signal.SIGSTOP)
         try:
-            t.start()
-            self.assertEqual(c.put('k', 'new'), 200)
-            acked = time.monotonic()
-            self.assertEqual(c.nodes()[1]['state'], 'REPAIRING')
-            time.sleep(0.5)
+            self.assertEqual(c.get('k'), 'new')
+            self.assertEqual(entry(1), entry(3))
         finally:
             os.kill(pid, signal.SIGCONT)
-        wait_for(lambda: c.nodes()[1]['state'] == 'ACTIVE', 20, 'node 1 ACTIVE')
-        stop.set()
-        t.join(10)
-        self.assertEqual(c.dump(1)['k'][0], 'new')
-        after = [v for start, v in reads if start > acked]
-        self.assertTrue(after)
-        self.assertEqual(set(after), {'new'})
+
+    def test_write_fails_with_two_home_replicas_down_and_no_other_node_takes_it(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=4, KV_CP_MAX_NODES=4, KV_CP_REPLICAS=3,
+                         KV_CP_READ_QUORUM=2, KV_CP_WRITE_QUORUM=2, KV_CP_FORWARD_TIMEOUT_MS=300,
+                         KV_CP_PROBE_FAILS=100).start(wait_nodes=4)
+        self.assertEqual(c.put('k', 'v1'), 200)
+        homes = [n for n in (1, 2, 3, 4) if 'k' in c.dump(n)]
+        other = ({1, 2, 3, 4} - set(homes)).pop()
+        self.assertEqual(len(homes), 3)
+        pids = c.node_pids()
+        for n in homes[:2]:
+            os.kill(pids[n], signal.SIGSTOP)
+        try:
+            status, _, headers = c.req('POST', '/k', {'value': 'v2'})
+        finally:
+            for n in homes[:2]:
+                os.kill(pids[n], signal.SIGCONT)
+        self.assertEqual(status, 503)
+        self.assertEqual(headers.get('retry-after'), '1')
+        self.assertNotIn('k', c.dump(other))
 
     def test_write_fails_when_every_replica_is_stopped(self):
         c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2, KV_CP_FORWARD_TIMEOUT_MS=300,
@@ -300,7 +314,8 @@ class FailureTest(ClusterTest):
         self.assertEqual(headers.get('retry-after'), '1')
 
     def test_dead_node_is_respawned_and_repaired_before_reads(self):
-        c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2).start()
+        c = self.cluster(KV_CP_INITIAL_NODES=3, KV_CP_REPLICAS=3, KV_CP_READ_QUORUM=2,
+                         KV_CP_WRITE_QUORUM=2).start(wait_nodes=3)
         for i in range(100):
             c.put(f'k{i}', 'old')
         c.delete('k99')
@@ -311,9 +326,10 @@ class FailureTest(ClusterTest):
         for i in range(1, 50):
             self.assertEqual(c.put(f'k{i}', 'new'), 200)
         self.assertEqual(c.delete('k98'), 200)
-        c.wait_active(2, 30)
-        d1, d2 = c.dump(1), c.dump(2)
+        c.wait_active(3, 30)
+        d1, d2, d3 = c.dump(1), c.dump(2), c.dump(3)
         self.assertEqual(d1, d2)
+        self.assertEqual(d1, d3)
         self.assertEqual(d1['k0'][0], 'new')
         self.assertEqual(d1['k60'][0], 'old')
         self.assertTrue(d1['k98'][2] and d1['k99'][2])
@@ -548,6 +564,27 @@ class LinearizabilityTest(ClusterTest):
         self.assertTrue(linearizable([(0, INF, 'put', 'a', None), (2, 3, 'get', None, None)]))
         self.assertFalse(linearizable([(0, 1, 'del', None, True)]))
 
+    def check_history(self, log):
+        by_key = {}
+        for key, op in log:
+            by_key.setdefault(key, []).append(op)
+        self.assertGreater(sum(1 for _, o in log if o[1] != INF), 100)
+        for key, ops in by_key.items():
+            self.assertTrue(linearizable(ops), f'history of {key} is not linearizable: {ops}')
+
+    def test_ops_on_one_key_are_linearizable_with_quorums_and_a_killed_node(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=3, KV_CP_REPLICAS=3, KV_CP_READ_QUORUM=2,
+                         KV_CP_WRITE_QUORUM=2).start(wait_nodes=3)
+        log = []
+        clients = [History(c, f'c{n}', ['x', 'y', 'z'], 90, log) for n in range(4)]
+        for t in clients:
+            t.start()
+        time.sleep(0.5)
+        c.kill_node(1)
+        for t in clients:
+            t.join(120)
+        self.check_history(log)
+
     def test_ops_on_one_key_are_linearizable_during_join_and_failure(self):
         c = self.cluster(KV_CP_INITIAL_NODES=2, KV_CP_REPLICAS=2, KV_CP_MAX_NODES=3).start()
         log = []
@@ -561,12 +598,7 @@ class LinearizabilityTest(ClusterTest):
             t.join(120)
         self.assertEqual(c.migration()['phase'], 'IDLE')
         self.assertEqual(len(c.nodes()), 3)
-        by_key = {}
-        for key, op in log:
-            by_key.setdefault(key, []).append(op)
-        self.assertGreater(sum(1 for _, o in log if o[1] != INF), 100)
-        for key, ops in by_key.items():
-            self.assertTrue(linearizable(ops), f'history of {key} is not linearizable: {ops}')
+        self.check_history(log)
 
 
 def wait_settled(c, count):
