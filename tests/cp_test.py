@@ -267,6 +267,13 @@ class FailureTest(ClusterTest):
         self.assertEqual(d1['k60'][0], 'old')
         self.assertTrue(d1['k98'][2] and d1['k99'][2])
 
+    def test_503_carries_retry_after(self):
+        c = self.cluster().start()
+        c.kill_node(1)
+        status, _, headers = c.req('POST', '/k', {'value': 'v'})
+        self.assertEqual(status, 503)
+        self.assertEqual(headers.get('retry-after'), '1')
+
     def test_rf1_respawned_node_keeps_its_volume(self):
         c = self.cluster(KV_SYNC_ACK=1).start()
         for i in range(20):
