@@ -20,6 +20,8 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CP_BIN = os.path.join(ROOT, 'build', 'kv-cp-proc')
 NODE_BIN = os.path.join(ROOT, 'build', 'app')
+# Command prefix for cp, e.g. valgrind (tests/memcheck.sh).
+CP_WRAPPER = os.environ.get('KV_CP_WRAPPER', '').split()
 CP_PORT = 7980
 BASE_PORT = 7990
 
@@ -73,7 +75,8 @@ class Cluster:
         full = dict(os.environ)
         full.update(self.env)
         with open(os.path.join(self.dir, 'cp.stderr'), 'ab') as err:
-            self.proc = subprocess.Popen([CP_BIN], env=full, stdout=subprocess.DEVNULL, stderr=err)
+            self.proc = subprocess.Popen(CP_WRAPPER + [CP_BIN], env=full, stdout=subprocess.DEVNULL,
+                                         stderr=err)
         n = wait_nodes if wait_nodes is not None else int(self.env.get('KV_CP_INITIAL_NODES', 1))
         if n:
             self.wait_active(n)
@@ -83,7 +86,7 @@ class Cluster:
         if self.proc and self.proc.poll() is None:
             self.proc.send_signal(sig)
             try:
-                self.proc.wait(10)
+                self.proc.wait(30)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
@@ -93,7 +96,7 @@ class Cluster:
             w.stop_flag = True
         for w in self.writers:
             w.join(15)
-        self.stop(signal.SIGKILL)
+        self.stop()
         for pid in self.node_pids().values():
             try:
                 os.kill(pid, signal.SIGKILL)

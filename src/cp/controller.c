@@ -262,6 +262,8 @@ static void sink_row(sink *s, const json_val *row) {
   }
 }
 
+static void reserve_versions(controller *ctl);
+
 /** Decides per dumped row whether it goes to the sink. */
 typedef bool (*row_filter)(controller *ctl, const char *key, size_t key_len, void *arg);
 
@@ -275,6 +277,7 @@ static int copy_rows(controller *ctl, const char *src, row_filter filter, void *
   }
   char *cursor = strdup("");
   while (cursor) {
+    reserve_versions(ctl);
     size_t path_len = strlen(cursor) + 64;
     char *path = malloc(path_len);
     if (!path) {

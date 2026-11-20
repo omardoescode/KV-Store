@@ -421,6 +421,7 @@ void cp_router_register(http_server *server, cluster *c, logger *log) {
   http_handle(server, HTTP_POST, "/_cp/nodes", add_node_handler, c);
   http_handle(server, HTTP_GET, "/_cp/ring", ring_handler, c);
   http_handle(server, HTTP_GET, "/_cp/migration", migration_handler, c);
+  http_on_worker_exit(server, fwd_thread_free);
 }
 
 void cp_router_free(void) {

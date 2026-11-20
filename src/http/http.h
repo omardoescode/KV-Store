@@ -87,6 +87,9 @@ int http_default_threads(void);
  */
 int http_listen_and_serve(http_server *s, const char *addr, int threads);
 
+/** Run fn on each worker thread when its loop stops, while the loop still exists. */
+void http_on_worker_exit(http_server *s, void (*fn)(void));
+
 /**
  * Make http_listen_and_serve stop accepting connections, wait up to 5 s for open requests to
  * finish, and return 0. Async-signal-safe; any thread, also before the server starts.

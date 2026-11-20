@@ -298,3 +298,16 @@ void fwd_send(const char *addr, const fwd_req *req, fwd_cb cb, void *ctx) {
   h2o_timer_link(http_current_loop(), (uint64_t)req->timeout_ms, &o->timer);
   start(o);
 }
+
+void fwd_thread_free(void) {
+  while (pools) {
+    pool *p = pools;
+    pools = p->next;
+    for (h2o_linklist_t *l = p->idle.next; l != &p->idle;) {
+      conn *c = H2O_STRUCT_FROM_MEMBER(conn, link, l);
+      l = l->next;
+      conn_close(c);
+    }
+    free(p);
+  }
+}

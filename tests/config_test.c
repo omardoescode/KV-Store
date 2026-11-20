@@ -117,12 +117,14 @@ static void test_bad_listen_addr(void) {
 }
 
 static const char *const CP_VARS[] = {
-    "KV_CP_LISTEN_ADDR",       "KV_CP_DB_PATH",        "KV_CP_LOG_PATH",
-    "KV_CP_THREADS",           "KV_CP_INITIAL_NODES",  "KV_CP_MIN_NODES",
-    "KV_CP_MAX_NODES",         "KV_CP_REPLICAS",       "KV_CP_VNODES",
-    "KV_CP_SCALE_RPS",         "KV_CP_SCALE_WINDOW_S", "KV_CP_SCALE_COOLDOWN_S",
-    "KV_CP_PROBE_INTERVAL_MS", "KV_CP_PROBE_FAILS",    "KV_CP_FORWARD_TIMEOUT_MS",
-    "KV_CP_NODE_IMAGE",        "KV_CP_NODE_BASE_PORT",
+    "KV_CP_LISTEN_ADDR",      "KV_CP_DB_PATH",
+    "KV_CP_LOG_PATH",         "KV_CP_THREADS",
+    "KV_CP_INITIAL_NODES",    "KV_CP_MAX_NODES",
+    "KV_CP_REPLICAS",         "KV_CP_VNODES",
+    "KV_CP_SCALE_RPS",        "KV_CP_SCALE_WINDOW_S",
+    "KV_CP_SCALE_COOLDOWN_S", "KV_CP_PROBE_INTERVAL_MS",
+    "KV_CP_PROBE_FAILS",      "KV_CP_FORWARD_TIMEOUT_MS",
+    "KV_CP_NODE_IMAGE",       "KV_CP_NODE_BASE_PORT",
 };
 
 static void cp_set_required(void) {
@@ -143,7 +145,6 @@ static void test_cp_defaults(void) {
   assert(strcmp(cfg.log_path, "-") == 0);
   assert(cfg.threads == 0);
   assert(cfg.initial_nodes == 1);
-  assert(cfg.min_nodes == 1);
   assert(cfg.max_nodes == 3);
   assert(cfg.replicas == 1);
   assert(cfg.vnodes == 128);
@@ -169,7 +170,6 @@ static void test_cp_overrides(void) {
   cp_config cfg;
   assert(cp_config_load(&cfg) == 0);
   assert(cfg.initial_nodes == 3);
-  assert(cfg.min_nodes == 3);
   assert(cfg.max_nodes == 5);
   assert(cfg.replicas == 2);
   assert(cfg.scale_rps == 500);
@@ -199,7 +199,9 @@ static void test_cp_bad(void) {
   cp_expect_bad("KV_CP_SCALE_RPS", "-1");
   cp_expect_bad("KV_CP_NODE_BASE_PORT", "65536");
   cp_set_required();
-  setenv("KV_CP_MIN_NODES", "4", 1);
+  setenv("KV_CP_INITIAL_NODES", "17", 1);
+  setenv("KV_CP_MAX_NODES", "17", 1);
+  setenv("KV_CP_REPLICAS", "17", 1);
   assert(cp_config_load(&cfg) == -1);
   printf("  test_cp_bad OK\n");
 }

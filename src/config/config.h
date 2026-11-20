@@ -32,7 +32,6 @@ typedef struct {
   int threads;
   int initial_nodes;
   /** Not used yet: no scale-down. */
-  int min_nodes;
   int max_nodes;
   int replicas;
   int vnodes;
@@ -50,8 +49,8 @@ typedef struct {
 } cp_config;
 
 /**
- * Fill cfg from the environment like config_load. Also fails if REPLICAS > INITIAL_NODES,
- * INITIAL_NODES > MAX_NODES or MIN_NODES > MAX_NODES.
+ * Fill cfg from the environment like config_load. Also fails if REPLICAS > INITIAL_NODES or
+ * INITIAL_NODES > MAX_NODES.
  */
 int cp_config_load(cp_config *cfg);
 

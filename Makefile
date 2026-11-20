@@ -198,7 +198,7 @@ test: $(TEST_BINS) $(TARGET) $(CP_PROC_TARGET)
 	tests/shutdown_test.sh
 	python3 tests/cp_test.py
 
-memcheck: $(TARGET)
+memcheck: $(TARGET) $(CP_PROC_TARGET)
 	tests/memcheck.sh
 
 bench:

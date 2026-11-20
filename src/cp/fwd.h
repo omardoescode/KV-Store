@@ -35,4 +35,7 @@ typedef void (*fwd_cb)(void *ctx, const fwd_result *res);
  */
 void fwd_send(const char *addr, const fwd_req *req, fwd_cb cb, void *ctx);
 
+/** Close the idle connections of the calling thread and free its pools. */
+void fwd_thread_free(void);
+
 #endif

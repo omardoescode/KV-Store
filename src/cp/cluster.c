@@ -36,6 +36,10 @@ static uint64_t next_version(cluster *c) {
   if (v <= c->last_version) {
     v = c->last_version + 1;
   }
+  // Above the stored mark, a restart could hand out this version again.
+  if (v >= c->version_mark) {
+    return 0;
+  }
   c->last_version = v;
   return v;
 }
@@ -55,7 +59,8 @@ int cluster_plan_write(cluster *c, const char *key, size_t key_len, plan *out) {
   out->count = 0;
   int prefs[RING_MAX_REPLICAS];
   pthread_mutex_lock(&c->mu);
-  size_t n = c->ring ? ring_prefs(c->ring, key, key_len, prefs) : 0;
+  out->version = next_version(c);
+  size_t n = c->ring && out->version ? ring_prefs(c->ring, key, key_len, prefs) : 0;
   for (size_t i = 0; i != n; i++) {
     cnode *node = &c->nodes[prefs[i]];
     if (node_takes_writes(node->sm.state)) {
@@ -71,7 +76,6 @@ int cluster_plan_write(cluster *c, const char *key, size_t key_len, plan *out) {
   if (c->double_write && c->next && ring_has(c->next, c->target, key, key_len)) {
     add_target(out, c->target, &c->nodes[c->target]);
   }
-  out->version = next_version(c);
   take_ticket(c, out);
   pthread_mutex_unlock(&c->mu);
   return 0;
