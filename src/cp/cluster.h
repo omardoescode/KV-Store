@@ -1,7 +1,6 @@
 #ifndef CP_CLUSTER_H
 #define CP_CLUSTER_H
 
-#include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -10,51 +9,17 @@
 #include "cp/driver.h"
 #include "cp/ring.h"
 #include "cp/sm.h"
+#include "cp/store.h"
+#include "log/log.h"
 
 /**
- * The view of the cluster that the router (event loop threads) and the controller thread share.
- * All fields are guarded by mu. The router reads it to plan each request; the controller
- * changes it.
+ * The nodes, rings and join phase of cp. The router (event loop threads) plans requests with it;
+ * the controller thread changes it. Each change is written to the store before it applies, so a
+ * new cp starts from the last change.
  */
+typedef struct cluster cluster;
 
 enum { CLUSTER_MAX_NODES = 1024 };
-
-typedef struct {
-  bool exists;
-  char addr[DRIVER_ADDR_LEN];
-  node_sm sm;
-  bool in_ring;
-  /** The router saw a forward to this node fail since the controller last looked. */
-  bool forward_error;
-  /** Forwards to this node, for its RPS. */
-  uint64_t requests;
-} cnode;
-
-typedef struct {
-  pthread_mutex_t mu;
-  const cp_config *cfg;
-  /** Indexed by node id; ids start at 1. */
-  cnode nodes[CLUSTER_MAX_NODES + 1];
-  /** The ring that owns keys now. */
-  ring *ring;
-  /** During a join before FLIP: the ring with the target. */
-  ring *next;
-  /** During a join from FLIP: the ring before the join, for PURGE. */
-  ring *prev;
-  mig_phase phase;
-  int target;
-  /** COPY: writes of keys that move to the target also go to the target. */
-  bool double_write;
-  /** A write to the target failed during COPY: the join must abort. */
-  bool double_write_failed;
-  uint64_t last_version;
-  uint64_t version_mark;
-  /** Requests take a ticket of the current epoch; a drain waits for older tickets. */
-  uint64_t epoch;
-  long inflight[2];
-  /** POST /_cp/nodes asked for a node. */
-  bool add_requested;
-} cluster;
 
 typedef struct {
   int id;
@@ -72,7 +37,36 @@ typedef struct {
   uint64_t epoch;
 } plan;
 
-int cluster_init(cluster *c, const cp_config *cfg);
+typedef struct {
+  bool exists;
+  char addr[DRIVER_ADDR_LEN];
+  node_sm sm;
+  bool in_ring;
+  /** Forwards to this node, for its RPS. */
+  uint64_t requests;
+} cluster_node;
+
+/** A copy of the cluster. */
+typedef struct {
+  /** Indexed by node id; ids start at 1. */
+  cluster_node nodes[CLUSTER_MAX_NODES + 1];
+  int count;
+  mig_phase phase;
+  int target;
+  /** POST /_cp/nodes asked for a node. */
+  bool add_requested;
+  /**
+   * The ring that owns keys; during a join before FLIP the ring with the target (next), from
+   * FLIP to IDLE the ring before the join (prev). NULL if none. They stay valid until the
+   * controller changes the cluster again; only the controller thread may read them.
+   */
+  const ring *ring;
+  const ring *next;
+  const ring *prev;
+} cluster_view;
+
+/** Read the version mark from store. Returns NULL on error. */
+cluster *cluster_new(const cp_config *cfg, cp_store *store, logger log);
 void cluster_free(cluster *c);
 
 /** Plan a write of key: fails (-1) if no replica takes writes. Takes a ticket on success. */
@@ -84,13 +78,43 @@ void cluster_done(cluster *c, uint64_t epoch);
 /** Note a failed forward to node id; join_target: it was the double-write to the target. */
 void cluster_forward_failed(cluster *c, int id, bool join_target);
 
+/** POST /_cp/nodes: ask the controller for one more node. False at KV_CP_MAX_NODES. */
+bool cluster_request_add(cluster *c);
+
+void cluster_snapshot(cluster *c, cluster_view *out);
+
+// The rest is for the controller thread only.
+
 /**
- * Wait until every request that took a ticket before this call finishes. Controller only.
- * Returns 0, or -1 after timeout_ms.
+ * Wait until every request that took a ticket before this call finishes. Returns 0, or -1
+ * after timeout_ms.
  */
 int cluster_drain(cluster *c, int timeout_ms);
 
-/** Build a ring of in-ring nodes, plus extra if not 0. Call with mu held. NULL on error. */
-ring *cluster_build_ring(cluster *c, int extra);
+/** Insert or replace node id. Not during a join. Returns 0 or -1. */
+int cluster_put_node(cluster *c, int id, const char *addr, node_sm sm, bool in_ring);
+/** Remove node id. Returns 0 or -1. */
+int cluster_drop_node(cluster *c, int id);
+/** Apply ev to node id and return the actions. */
+unsigned cluster_node_event(cluster *c, int id, node_event ev);
+/** A spawn of node id answers at addr: apply NODE_EV_SPAWN_OK and return the actions. */
+unsigned cluster_spawned(cluster *c, int id, const char *addr);
+/** Return and clear whether a forward to node id failed since the last call. */
+bool cluster_take_forward_error(cluster *c, int id);
+/** Move the stored version mark ahead when the versions in use come near it. */
+void cluster_reserve_versions(cluster *c);
+
+/** Set the join phase. IDLE drops the rings of the join. Returns 0 or -1. */
+int cluster_set_phase(cluster *c, mig_phase phase, int target);
+/** Choose the id of a new node, clear the add request and set phase SPAWN. Returns it, or -1. */
+int cluster_begin_join(cluster *c);
+/** COPY: writes of keys that move to target go to target too. Returns 0 or -1. */
+int cluster_begin_copy(cluster *c, int target);
+/** Return whether a write to the target failed since cluster_begin_copy. */
+bool cluster_copy_lost_write(cluster *c);
+/** FLIP: the ring with target owns keys; the ring before the join stays as prev. */
+void cluster_flip(cluster *c, int target);
+/** Stop writes to target; plans are as before the join. */
+void cluster_abort_join(cluster *c, int target);
 
 #endif

@@ -57,19 +57,19 @@ int main(void) {
   }
   logger log = async_log_logger(alog);
   int status = 1;
-  static cluster c;
   cp_store *store = cp_store_open(cfg.db_path);
+  cluster *c = store ? cluster_new(&cfg, store, log) : NULL;
   controller *ctl = NULL;
   http_server *server = NULL;
-  if (!store || cluster_init(&c, &cfg) != 0 || driver_init(&cfg, log) != 0) {
+  if (!c || driver_init(&cfg, log) != 0) {
     goto out;
   }
-  ctl = controller_new(&c, store, log);
+  ctl = controller_new(c, store, &cfg, log);
   if (!ctl || controller_start_up(ctl) != 0 || controller_run(ctl) != 0) {
     goto out;
   }
   server = http_server_new();
-  cp_router_register(server, &c, &log);
+  cp_router_register(server, c, &cfg, &log);
   pthread_t signal_thread;
   if (sem_init(&server_stopping, 0, 0) != 0 ||
       pthread_create(&signal_thread, NULL, wait_for_signal, server) != 0) {
@@ -93,6 +93,7 @@ out:
     http_server_free(server);
   }
   cp_router_free();
+  cluster_free(c);
   cp_store_close(store);
   async_log_close(alog);
   if (log_file != stdout) {

@@ -77,7 +77,7 @@ static int copy_into(controller *ctl, const char *src, row_filter filter, void *
   }
   char *cursor = strdup("");
   while (cursor) {
-    ctl_reserve_versions(ctl);
+    cluster_reserve_versions(ctl->c);
     size_t path_len = strlen(cursor) + 64;
     char *path = malloc(path_len);
     if (!path) {
@@ -138,11 +138,12 @@ int ctl_copy_rows(controller *ctl, const char *src, row_filter filter, void *arg
   return rc;
 }
 
-int ctl_first_reader(controller *ctl, const ring *r, const char *key, size_t key_len, int skip) {
+int ctl_first_reader(const cluster_view *v, const ring *r, const char *key, size_t key_len,
+                     int skip) {
   int prefs[RING_MAX_REPLICAS];
   size_t n = ring_prefs(r, key, key_len, prefs);
   for (size_t i = 0; i != n; i++) {
-    if (prefs[i] != skip && node_serves_reads(ctl->c->nodes[prefs[i]].sm.state)) {
+    if (prefs[i] != skip && node_serves_reads(v->nodes[prefs[i]].sm.state)) {
       return prefs[i];
     }
   }
@@ -150,17 +151,16 @@ int ctl_first_reader(controller *ctl, const ring *r, const char *key, size_t key
 }
 
 typedef struct {
+  const cluster_view *v;
   int node;
   int source;
 } repair_arg;
 
 static bool repair_filter(controller *ctl, const char *key, size_t key_len, void *arg) {
+  (void)ctl;
   repair_arg *a = arg;
-  pthread_mutex_lock(&ctl->c->mu);
-  bool keep = (bool)(ring_has(ctl->c->ring, a->node, key, key_len) &&
-                     ctl_first_reader(ctl, ctl->c->ring, key, key_len, a->node) == a->source);
-  pthread_mutex_unlock(&ctl->c->mu);
-  return keep;
+  return (bool)(ring_has(a->v->ring, a->node, key, key_len) &&
+                ctl_first_reader(a->v, a->v->ring, key, key_len, a->node) == a->source);
 }
 
 int ctl_repair(controller *ctl, int id) {
@@ -170,23 +170,22 @@ int ctl_repair(controller *ctl, int id) {
     return -1;
   }
   ctl_set_purge_all(ctl, true);
-  pthread_mutex_lock(&ctl->c->mu);
-  char addr[DRIVER_ADDR_LEN];
-  memcpy(addr, ctl->c->nodes[id].addr, sizeof(addr));
-  pthread_mutex_unlock(&ctl->c->mu);
-  static node_ref sources[CLUSTER_MAX_NODES];
-  size_t n = ctl_snapshot(ctl, node_serves_reads, sources);
+  static cluster_view v;
+  cluster_snapshot(ctl->c, &v);
   int rc = 0;
-  for (size_t i = 0; i != n && rc == 0; i++) {
-    repair_arg a = {id, sources[i].id};
-    rc = ctl_copy_rows(ctl, sources[i].addr, repair_filter, &a, addr, "/_internal/batch");
+  for (int src = 1; src <= CLUSTER_MAX_NODES && rc == 0; src++) {
+    if (v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state)) {
+      repair_arg a = {&v, id, src};
+      rc = ctl_copy_rows(ctl, v.nodes[src].addr, repair_filter, &a, v.nodes[id].addr,
+                         "/_internal/batch");
+    }
   }
   ctl_set_purge_all(ctl, false);
   return rc;
 }
 
 void ctl_respawn(controller *ctl, int id) {
-  unsigned act = ctl_node_event(ctl, id, NODE_EV_RESPAWN);
+  unsigned act = cluster_node_event(ctl->c, id, NODE_EV_RESPAWN);
   if ((act & NODE_ACT_SPAWN) == 0) {
     return;
   }
@@ -195,16 +194,13 @@ void ctl_respawn(controller *ctl, int id) {
   char addr[DRIVER_ADDR_LEN];
   if (driver_spawn(id, raw) != 0 || ctl_resolve(raw, addr) != 0 || !ctl_wait_healthy(ctl, addr)) {
     LOGF(ctl, LOG_ERROR, "node %d: spawn failed", id);
-    (void)ctl_node_event(ctl, id, NODE_EV_SPAWN_FAIL);
+    (void)cluster_node_event(ctl->c, id, NODE_EV_SPAWN_FAIL);
     return;
   }
-  pthread_mutex_lock(&ctl->c->mu);
-  memcpy(ctl->c->nodes[id].addr, addr, sizeof(addr));
-  pthread_mutex_unlock(&ctl->c->mu);
-  act = ctl_node_event(ctl, id, NODE_EV_SPAWN_OK);
+  act = cluster_spawned(ctl->c, id, addr);
   while ((act & NODE_ACT_REPAIR) != 0) {
     if (ctl_repair(ctl, id) == 0) {
-      (void)ctl_node_event(ctl, id, NODE_EV_REPAIR_DONE);
+      (void)cluster_node_event(ctl->c, id, NODE_EV_REPAIR_DONE);
       return;
     }
     LOGF(ctl, LOG_WARN, "node %d: repair failed", id);
@@ -212,7 +208,7 @@ void ctl_respawn(controller *ctl, int id) {
       // Leave it REPAIRING: probes find it dead and spawn it again.
       return;
     }
-    act = ctl_node_event(ctl, id, NODE_EV_REPAIR_FAIL);
+    act = cluster_node_event(ctl->c, id, NODE_EV_REPAIR_FAIL);
     ctl_sleep_ms(ctl->cfg->probe_interval_ms);
   }
 }

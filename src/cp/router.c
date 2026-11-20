@@ -1,6 +1,7 @@
 #include "cp/router.h"
 
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -229,6 +230,7 @@ static void run_op(void *arg) {
 
 typedef struct {
   cluster *c;
+  const cp_config *cfg;
   logger *log;
 } route_ctx;
 
@@ -263,7 +265,7 @@ static void handle_key(http_response *w, const http_request *r, op_kind kind) {
   o->c = rc->c;
   o->log = rc->log;
   o->kind = kind;
-  o->timeout_ms = rc->c->cfg->forward_timeout_ms;
+  o->timeout_ms = rc->cfg->forward_timeout_ms;
   o->body_len = body.len;
   if (body.len) {
     memcpy(o->body, body.ptr, body.len);
@@ -307,14 +309,19 @@ static void write_json(http_response *w, int status, json_node *root) {
 
 static void nodes_handler(http_response *w, const http_request *r, void *arg) {
   (void)r;
-  cluster *c = arg;
+  (void)arg;
+  cluster_view *v = malloc(sizeof(*v));
+  if (!v) {
+    http_write(w, 500, NULL, 0);
+    return;
+  }
+  cluster_snapshot(ctx_storage.c, v);
   json_builder *b = json_builder_new();
   json_node *root = json_new_obj(b);
   json_node *arr = json_new_arr(b);
   bool ok = json_put(b, root, "nodes", arr);
-  pthread_mutex_lock(&c->mu);
   for (int id = 1; ok && id <= CLUSTER_MAX_NODES; id++) {
-    const cnode *n = &c->nodes[id];
+    const cluster_node *n = &v->nodes[id];
     if (!n->exists) {
       continue;
     }
@@ -325,39 +332,49 @@ static void nodes_handler(http_response *w, const http_request *r, void *arg) {
                 json_put(b, item, "state", json_new_str(b, state, strlen(state))) &&
                 json_put(b, item, "in_ring", json_new_bool(b, n->in_ring)) && json_push(arr, item));
   }
-  pthread_mutex_unlock(&c->mu);
+  free(v);
   write_json(w, 200, ok ? root : NULL);
   json_builder_free(b);
 }
 
 static void ring_handler(http_response *w, const http_request *r, void *arg) {
   (void)r;
-  cluster *c = arg;
+  (void)arg;
+  cluster_view *v = malloc(sizeof(*v));
+  if (!v) {
+    http_write(w, 500, NULL, 0);
+    return;
+  }
+  cluster_snapshot(ctx_storage.c, v);
   json_builder *b = json_builder_new();
   json_node *root = json_new_obj(b);
   json_node *arr = json_new_arr(b);
   bool ok = true;
-  pthread_mutex_lock(&c->mu);
   for (int id = 1; ok && id <= CLUSTER_MAX_NODES; id++) {
-    if (c->nodes[id].exists && c->nodes[id].in_ring) {
+    if (v->nodes[id].exists && v->nodes[id].in_ring) {
       ok = json_push(arr, json_new_int(b, id));
     }
   }
-  pthread_mutex_unlock(&c->mu);
+  free(v);
   ok = (bool)(ok && json_put(b, root, "nodes", arr) &&
-              json_put(b, root, "vnodes", json_new_int(b, c->cfg->vnodes)) &&
-              json_put(b, root, "replicas", json_new_int(b, c->cfg->replicas)));
+              json_put(b, root, "vnodes", json_new_int(b, ctx_storage.cfg->vnodes)) &&
+              json_put(b, root, "replicas", json_new_int(b, ctx_storage.cfg->replicas)));
   write_json(w, 200, ok ? root : NULL);
   json_builder_free(b);
 }
 
 static void migration_handler(http_response *w, const http_request *r, void *arg) {
   (void)r;
-  cluster *c = arg;
-  pthread_mutex_lock(&c->mu);
-  mig_phase phase = c->phase;
-  int target = c->target;
-  pthread_mutex_unlock(&c->mu);
+  (void)arg;
+  cluster_view *v = malloc(sizeof(*v));
+  if (!v) {
+    http_write(w, 500, NULL, 0);
+    return;
+  }
+  cluster_snapshot(ctx_storage.c, v);
+  mig_phase phase = v->phase;
+  int target = v->target;
+  free(v);
   json_builder *b = json_builder_new();
   json_node *root = json_new_obj(b);
   const char *name = mig_phase_name(phase);
@@ -371,18 +388,8 @@ static void migration_handler(http_response *w, const http_request *r, void *arg
 /** POST /_cp/nodes: ask the controller to add one node; 409 at KV_CP_MAX_NODES. */
 static void add_node_handler(http_response *w, const http_request *r, void *arg) {
   (void)r;
-  cluster *c = arg;
-  pthread_mutex_lock(&c->mu);
-  int count = 0;
-  for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
-    count += c->nodes[id].exists ? 1 : 0;
-  }
-  bool full = count >= c->cfg->max_nodes;
-  if (!full) {
-    c->add_requested = true;
-  }
-  pthread_mutex_unlock(&c->mu);
-  if (full) {
+  (void)arg;
+  if (!cluster_request_add(ctx_storage.c)) {
     static const char message[] = "KV_CP_MAX_NODES reached\n";
     http_write(w, 409, message, sizeof(message) - 1);
     return;
@@ -392,18 +399,17 @@ static void add_node_handler(http_response *w, const http_request *r, void *arg)
   http_write(w, 202, body, sizeof(body) - 1);
 }
 
-void cp_router_register(http_server *server, cluster *c, logger *log) {
-  ctx_storage = (route_ctx){c, log};
+void cp_router_register(http_server *server, cluster *c, const cp_config *cfg, logger *log) {
+  ctx_storage = (route_ctx){c, cfg, log};
   http_handle(server, HTTP_GET, "/{key}", get_handler, NULL);
   http_handle(server, HTTP_POST, "/{key}", post_handler, NULL);
   http_handle(server, HTTP_DELETE, "/{key}", delete_handler, NULL);
-  http_handle(server, HTTP_GET, "/_cp/nodes", nodes_handler, c);
-  http_handle(server, HTTP_POST, "/_cp/nodes", add_node_handler, c);
-  http_handle(server, HTTP_GET, "/_cp/ring", ring_handler, c);
-  http_handle(server, HTTP_GET, "/_cp/migration", migration_handler, c);
+  http_handle(server, HTTP_GET, "/_cp/nodes", nodes_handler, NULL);
+  http_handle(server, HTTP_POST, "/_cp/nodes", add_node_handler, NULL);
+  http_handle(server, HTTP_GET, "/_cp/ring", ring_handler, NULL);
+  http_handle(server, HTTP_GET, "/_cp/migration", migration_handler, NULL);
   http_on_worker_exit(server, fwd_thread_free);
 }
-
 void cp_router_free(void) {
   pthread_mutex_lock(&keys_mu);
   for (size_t i = 0; i != KEYS_BUCKETS; i++) {

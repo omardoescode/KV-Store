@@ -48,7 +48,7 @@ DEP := $(SRC:src/%.c=$(BUILD_DIR)/%.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-ring test-sm test-cp test-shutdown memcheck bench format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-ring test-sm test-cluster test-cp test-shutdown memcheck bench format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET) $(if $(wildcard src/cp/main.c),$(CP_TARGET) $(CP_PROC_TARGET))
 
@@ -183,7 +183,17 @@ $(SM_TEST_BIN): $(SM_TEST_SRC) src/cp/sm.h
 test-sm: $(SM_TEST_BIN)
 	./$(SM_TEST_BIN)
 
-TEST_BINS := $(HM_TEST_BIN) $(RING_TEST_BIN) $(SM_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
+CLUSTER_TEST_SRC := src/cp/cluster.c src/cp/ring.c src/cp/sm.c src/cp/store.c tests/cluster_test.c
+CLUSTER_TEST_BIN := $(BUILD_DIR)/cluster_test
+
+$(CLUSTER_TEST_BIN): $(CLUSTER_TEST_SRC) src/cp/cluster.h src/cp/ring.h src/cp/sm.h src/cp/store.h $(SIPHASH_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS) $(CLUSTER_TEST_SRC) $(SIPHASH_OBJ) $(SQLITE_LIBS) -o $@
+
+test-cluster: $(CLUSTER_TEST_BIN)
+	./$(CLUSTER_TEST_BIN)
+
+TEST_BINS := $(HM_TEST_BIN) $(RING_TEST_BIN) $(SM_TEST_BIN) $(CLUSTER_TEST_BIN) $(ROUTER_TEST_BIN) $(LOG_TEST_BIN) $(CONFIG_TEST_BIN) $(KV_STORE_TEST_BIN)
 
 test-cp: $(TARGET) $(CP_PROC_TARGET)
 	python3 tests/cp_test.py
