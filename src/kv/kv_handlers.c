@@ -1,5 +1,6 @@
 #include "kv_handlers.h"
 #include "kv_store.h"
+#include "vclock/vclock.h"
 #include "json/json.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -65,27 +66,39 @@ static char *key_copy(http_response *response, const http_request *request, size
 }
 
 /**
- * Set *version from the x-kv-version header that cp sends, or to 0 if absent. On a value that is
- * not a decimal uint64, respond 400 and return -1.
+ * Set *out from header name, a decimal at most max, or to 0 if absent. Returns 0, or -1 if the
+ * header is empty or not such a decimal.
  */
-static int version_of(http_response *response, const http_request *request, uint64_t *version) {
-  http_str h = http_req_header(request, HTTP_STR("x-kv-version"));
+static int header_uint(const http_request *request, http_str name, uint64_t max, uint64_t *out) {
+  http_str h = http_req_header(request, name);
   uint64_t v = 0;
   for (size_t i = 0; i != h.len; i++) {
     unsigned digit = (unsigned)(unsigned char)h.ptr[i] - '0';
-    if (digit > 9 || v > (UINT64_MAX - digit) / 10) {
-      static const char message[] = "x-kv-version must be a uint64\n";
-      http_write(response, 400, message, sizeof(message) - 1);
+    if (digit > 9 || v > (max - digit) / 10) {
       return -1;
     }
     v = (v * 10) + digit;
   }
-  if (h.ptr != NULL && h.len == 0) {
-    static const char message[] = "x-kv-version must be a uint64\n";
+  *out = v;
+  return h.ptr != NULL && h.len == 0 ? -1 : 0;
+}
+
+/**
+ * Set *stamp from the x-kv-clock, x-kv-ts and x-kv-coord headers that cp sends; an absent one
+ * gives the empty clock or 0. On a malformed one, respond 400 and return -1.
+ */
+static int stamp_of(http_response *response, const http_request *request, vstamp *stamp) {
+  http_str clock = http_req_header(request, HTTP_STR("x-kv-clock"));
+  uint64_t coord = 0;
+  if (vclock_decode(clock.ptr, clock.len, &stamp->clock) != 0 ||
+      header_uint(request, HTTP_STR("x-kv-ts"), UINT64_MAX, &stamp->ts) != 0 ||
+      header_uint(request, HTTP_STR("x-kv-coord"), INT32_MAX, &coord) != 0) {
+    static const char message[] =
+        "want x-kv-clock \"id:n,...\", x-kv-ts uint64 and x-kv-coord int32 >= 0\n";
     http_write(response, 400, message, sizeof(message) - 1);
     return -1;
   }
-  *version = v;
+  stamp->coord = (int)coord;
   return 0;
 }
 
@@ -175,11 +188,11 @@ static void respond_change(http_response *response, kv_store *store, bool sync, 
   }
 }
 
-/** Handle POST /<key> {"value": string}, with x-kv-version from cp. */
+/** Handle POST /<key> {"value": string}, with the stamp headers from cp. */
 static void kv_post(http_response *response, const http_request *request, kv_store *store,
                     bool sync) {
-  uint64_t version;
-  if (version_of(response, request, &version) != 0) {
+  vstamp stamp;
+  if (stamp_of(response, request, &stamp) != 0) {
     return;
   }
   size_t key_len;
@@ -200,7 +213,7 @@ static void kv_post(http_response *response, const http_request *request, kv_sto
     return;
   }
 
-  int put_value = kv_store_put(store, key, value, value_len, version);
+  int put_value = kv_store_put(store, key, value, value_len, &stamp);
   json_doc_free(doc);
   free(key);
   int code = 200;
@@ -212,11 +225,11 @@ static void kv_post(http_response *response, const http_request *request, kv_sto
   respond_change(response, store, sync, code, "");
 }
 
-/** Handle DELETE /<key>, with x-kv-version from cp. */
+/** Handle DELETE /<key>, with the stamp headers from cp. */
 static void kv_del(http_response *response, const http_request *request, kv_store *store,
                    bool sync) {
-  uint64_t version;
-  if (version_of(response, request, &version) != 0) {
+  vstamp stamp;
+  if (stamp_of(response, request, &stamp) != 0) {
     return;
   }
   size_t key_len;
@@ -225,7 +238,7 @@ static void kv_del(http_response *response, const http_request *request, kv_stor
     return;
   }
 
-  int del_value = kv_store_del(store, key, version);
+  int del_value = kv_store_del(store, key, &stamp);
   free(key);
 
   if (del_value == 0) {
@@ -295,15 +308,63 @@ typedef struct {
   char *last;
 } dump_page;
 
+/** Add "value", "clock", "ts", "coord" and "deleted" of an entry to obj. Returns false on error. */
+static bool put_entry(json_builder *b, json_node *obj, const void *value, size_t value_len,
+                      const vstamp *stamp, bool deleted) {
+  char clock[VCLOCK_TEXT_MAX];
+  size_t clock_len = vclock_encode(&stamp->clock, clock);
+  return (bool)(json_put(b, obj, "value", json_new_str(b, value ? value : "", value_len)) &&
+                json_put(b, obj, "clock", json_new_str(b, clock, clock_len)) &&
+                json_put(b, obj, "ts", json_new_int(b, (int64_t)stamp->ts)) &&
+                json_put(b, obj, "coord", json_new_int(b, stamp->coord)) &&
+                json_put(b, obj, "deleted", json_new_bool(b, deleted)));
+}
+
+/** Respond 200 with the JSON root, or 500 if it is NULL or does not serialize. */
+static void write_json(http_response *response, const json_node *root) {
+  size_t len = 0;
+  char *bytes = root ? json_to_bytes(root, &len) : NULL;
+  if (bytes) {
+    http_set_header(response, HTTP_STR("content-type"), HTTP_STR("application/json"));
+    http_write(response, 200, bytes, len);
+  } else {
+    http_write(response, 500, NULL, 0);
+  }
+  free(bytes);
+}
+
+/**
+ * GET /_internal/get?key=<key>: the entry of key, a tombstone too, as
+ * {"value","clock","ts","coord","deleted"}; 404 if the node has none.
+ */
+static void get_entry_handler(http_response *response, const http_request *request, void *arg) {
+  http_str key = http_req_query(request, HTTP_STR("key"));
+  char *copy = key.ptr && valid_key(key.ptr, key.len) ? strndup(key.ptr, key.len) : NULL;
+  if (!copy) {
+    write_message(response, 400, "want ?key=<non-empty UTF-8 key>\n");
+    return;
+  }
+  kv_record r;
+  int rc = kv_store_read(arg, copy, &r);
+  free(copy);
+  if (rc != 1) {
+    http_write(response, rc == 0 ? 404 : 500, NULL, 0);
+    return;
+  }
+  json_builder *b = json_builder_new();
+  json_node *root = json_new_obj(b);
+  bool ok = put_entry(b, root, r.value, r.value_len, &r.stamp, r.deleted);
+  write_json(response, ok ? root : NULL);
+  json_builder_free(b);
+  free(r.value);
+}
+
 static int add_dump_row(void *ctx, const kv_dump_row *row) {
   dump_page *page = ctx;
   json_node *item = json_new_obj(page->b);
-  const char *value = row->value ? row->value : "";
   bool ok =
       (bool)(json_put(page->b, item, "key", json_new_str(page->b, row->key, strlen(row->key))) &&
-             json_put(page->b, item, "value", json_new_str(page->b, value, row->value_len)) &&
-             json_put(page->b, item, "version", json_new_int(page->b, (int64_t)row->version)) &&
-             json_put(page->b, item, "deleted", json_new_bool(page->b, row->deleted)) &&
+             put_entry(page->b, item, row->value, row->value_len, &row->stamp, row->deleted) &&
              json_push(page->items, item));
   free(page->last);
   page->last = strdup(row->key);
@@ -312,7 +373,8 @@ static int add_dump_row(void *ctx, const kv_dump_row *row) {
 
 /**
  * GET /_internal/dump?cursor=<key>&limit=<n>: committed rows with key > cursor in key order,
- * tombstones too, as {"items":[{key,value,version,deleted}],"next":<last key, or null at the end>}.
+ * tombstones too, as {"items":[{key,value,clock,ts,coord,deleted}],"next":<last key, or null at
+ * the end>}.
  */
 static void dump_handler(http_response *response, const http_request *request, void *arg) {
   kv_store *store = arg;
@@ -338,18 +400,9 @@ static void dump_handler(http_response *response, const http_request *request, v
   json_node *next = (size_t)count == limit && page.last
                         ? json_new_str(page.b, page.last, strlen(page.last))
                         : json_new_null(page.b);
-  size_t len = 0;
-  char *bytes = count >= 0 && json_put(page.b, root, "items", page.items) &&
-                        json_put(page.b, root, "next", next)
-                    ? json_to_bytes(root, &len)
-                    : NULL;
-  if (bytes) {
-    http_set_header(response, HTTP_STR("content-type"), HTTP_STR("application/json"));
-    http_write(response, 200, bytes, len);
-  } else {
-    http_write(response, 500, NULL, 0);
-  }
-  free(bytes);
+  bool ok = (bool)(count >= 0 && json_put(page.b, root, "items", page.items) &&
+                   json_put(page.b, root, "next", next));
+  write_json(response, ok ? root : NULL);
   free(page.last);
   free(after);
   json_builder_free(page.b);
@@ -369,9 +422,25 @@ static const json_val *body_array(const json_doc *doc, const char *name) {
   return json_type_of(arr) == JSON_ARRAY ? arr : NULL;
 }
 
+/** Read the "clock", "ts" and "coord" of a batch item into *stamp. Returns false if malformed. */
+static bool item_stamp(const json_val *item, vstamp *stamp) {
+  size_t clock_len = 0;
+  const char *clock = json_str(json_get(item, "clock"), &clock_len);
+  const json_val *ts = json_get(item, "ts");
+  const json_val *coord = json_get(item, "coord");
+  if (!clock || vclock_decode(clock, clock_len, &stamp->clock) != 0 ||
+      json_type_of(ts) != JSON_NUMBER || json_int(ts) < 0 || json_type_of(coord) != JSON_NUMBER ||
+      json_int(coord) < 0 || json_int(coord) > INT32_MAX) {
+    return false;
+  }
+  stamp->ts = (uint64_t)json_int(ts);
+  stamp->coord = (int)json_int(coord);
+  return true;
+}
+
 /**
- * POST /_internal/batch {"items":[{key,value,version,deleted}]}: versioned puts and tombstones,
- * each ignored if the stored version is higher. All items are checked before any is applied.
+ * POST /_internal/batch {"items":[{key,value,clock,ts,coord,deleted}]}: puts and tombstones, each
+ * applied by the winner rule. All items are checked before any is applied.
  */
 static void batch_handler(http_response *response, const http_request *request, void *arg) {
   kv_store *store = arg;
@@ -379,21 +448,20 @@ static void batch_handler(http_response *response, const http_request *request, 
   json_doc *doc = json_parse(body.ptr, body.len);
   const json_val *items = body_array(doc, "items");
   bool ok = items != NULL;
+  vstamp stamp;
   for (size_t i = 0; ok && i != json_len(items); i++) {
     const json_val *item = json_at(items, i);
     size_t key_len = 0;
     const char *key = json_str(json_get(item, "key"), &key_len);
-    const json_val *version = json_get(item, "version");
     ok = (bool)(key && valid_key(key, key_len) &&
-                json_type_of(json_get(item, "value")) == JSON_STRING &&
-                json_type_of(version) == JSON_NUMBER && json_int(version) >= 0 &&
+                json_type_of(json_get(item, "value")) == JSON_STRING && item_stamp(item, &stamp) &&
                 json_type_of(json_get(item, "deleted")) == JSON_BOOL);
   }
   if (!ok) {
     json_doc_free(doc);
     write_message(response, 400,
-                  "want {\"items\":[{\"key\":string,\"value\":string,\"version\":uint,"
-                  "\"deleted\":bool}]}\n");
+                  "want {\"items\":[{\"key\":string,\"value\":string,\"clock\":string,"
+                  "\"ts\":uint,\"coord\":uint,\"deleted\":bool}]}\n");
     return;
   }
   int rc = 0;
@@ -402,9 +470,9 @@ static void batch_handler(http_response *response, const http_request *request, 
     const char *key = json_str(json_get(item, "key"), NULL);
     size_t value_len = 0;
     const char *value = json_str(json_get(item, "value"), &value_len);
-    uint64_t version = (uint64_t)json_int(json_get(item, "version"));
-    rc = json_bool(json_get(item, "deleted")) ? kv_store_del(store, key, version)
-                                              : kv_store_put(store, key, value, value_len, version);
+    (void)item_stamp(item, &stamp);
+    rc = json_bool(json_get(item, "deleted")) ? kv_store_del(store, key, &stamp)
+                                              : kv_store_put(store, key, value, value_len, &stamp);
   }
   json_doc_free(doc);
   http_write(response, status_of(rc), NULL, 0);
@@ -461,6 +529,7 @@ void kv_register_routes(http_server *server, kv_store *store, logger *log, bool 
   http_handle(server, HTTP_POST, "/_internal/flush", flush_handler, store);
   http_handle(server, HTTP_GET, "/_internal/health", health_handler, NULL);
   http_handle(server, HTTP_GET, "/_internal/dump", dump_handler, store);
+  http_handle(server, HTTP_GET, "/_internal/get", get_entry_handler, store);
   http_handle(server, HTTP_POST, "/_internal/batch", batch_handler, store);
   http_handle(server, HTTP_POST, "/_internal/delete-batch", delete_batch_handler, store);
   http_handle(server, HTTP_POST, "/_internal/purge", purge_handler, store);

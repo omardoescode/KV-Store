@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "config/config.h"
+#include "vclock/vclock.h"
 
 /**
  * The /_internal API of a storage node at addr ("ip:port"). One implementation is linked into
@@ -18,7 +19,7 @@ typedef struct {
   size_t key_len;
   const char *value;
   size_t value_len;
-  int64_t version;
+  vstamp stamp;
   /** A tombstone. */
   bool deleted;
 } node_row;
@@ -38,10 +39,10 @@ typedef int (*node_page_fn)(void *arg, const node_row *rows, size_t n);
 /** Call fn with every committed row, tombstones too, in key order. Returns 0 or -1. */
 int node_dump(const char *addr, node_page_fn fn, void *arg);
 
-/** Write rows; a row older than the node's version of its key changes nothing. Returns 0 or -1. */
+/** Write rows; each applies by the winner rule against the node's entry. Returns 0 or -1. */
 int node_put_rows(const char *addr, const node_row *rows, size_t n);
 
-/** Remove the keys of rows and their tombstones, whatever their versions. Returns 0 or -1. */
+/** Remove the keys of rows and their tombstones, whatever their clocks. Returns 0 or -1. */
 int node_delete_keys(const char *addr, const node_row *rows, size_t n);
 
 /** Pause or resume the tombstone purge of the node. Returns 0 or -1. */

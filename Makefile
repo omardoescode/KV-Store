@@ -153,10 +153,10 @@ $(CONFIG_TEST_BIN): $(CONFIG_TEST_SRC) src/config/config.h
 test-config: $(CONFIG_TEST_BIN)
 	./$(CONFIG_TEST_BIN)
 
-KV_STORE_TEST_SRC := src/kv/kv_store.c src/hashmap/hashmap.c tests/kv_store_test.c
+KV_STORE_TEST_SRC := src/kv/kv_store.c src/hashmap/hashmap.c src/vclock/vclock.c tests/kv_store_test.c
 KV_STORE_TEST_BIN := $(BUILD_DIR)/kv_store_test
 
-$(KV_STORE_TEST_BIN): $(KV_STORE_TEST_SRC) src/kv/kv_store.h src/hashmap/hashmap.h src/log/log.h $(SIPHASH_OBJ)
+$(KV_STORE_TEST_BIN): $(KV_STORE_TEST_SRC) src/kv/kv_store.h src/vclock/vclock.h src/hashmap/hashmap.h src/log/log.h $(SIPHASH_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(CPPFLAGS) $(SIPHASH_CPPFLAGS) $(CFLAGS) $(KV_STORE_TEST_SRC) $(SIPHASH_OBJ) $(SQLITE_LIBS) -o $@
 
@@ -214,7 +214,8 @@ test-resolve: $(RESOLVE_TEST_BIN)
 	./$(RESOLVE_TEST_BIN)
 
 CTL_TEST_SRC := src/cp/controller.c src/cp/nodes.c src/cp/cluster.c \
-                src/cp/ring.c src/cp/sm.c src/cp/store.c tests/node_client_fake.c tests/driver_fake.c \
+                src/cp/ring.c src/cp/sm.c src/cp/store.c src/vclock/vclock.c \
+                tests/node_client_fake.c tests/driver_fake.c \
                 tests/controller_test.c
 CTL_TEST_BIN := $(BUILD_DIR)/controller_test
 

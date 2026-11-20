@@ -160,7 +160,7 @@ class Cluster:
                  and self.migration()['phase'] == 'IDLE', timeout, f'{n} ACTIVE nodes')
 
     def dump(self, node_id):
-        """Committed rows of one node: {key: (value, version, deleted)}."""
+        """Committed rows of one node: {key: (value, (clock, ts, coord), deleted)}."""
         self.node_req(node_id, 'POST', '/_internal/flush')
         rows, cursor = {}, ''
         while True:
@@ -168,7 +168,7 @@ class Cluster:
             assert status == 200, body
             page = json.loads(body)
             for it in page['items']:
-                rows[it['key']] = (it['value'], it['version'], it['deleted'])
+                rows[it['key']] = (it['value'], (it['clock'], it['ts'], it['coord']), it['deleted'])
             if page['next'] is None:
                 return rows
             cursor = page['next']

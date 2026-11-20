@@ -1,4 +1,5 @@
 #include "kv/kv_store.h"
+#include "vclock/vclock.h"
 
 #include <assert.h>
 #include <sqlite3.h>
@@ -46,14 +47,14 @@ static void test_values_survive_restart(const char *db) {
 
   kv_store *store = open_store(db, 10, 1000000);
   assert(store);
-  assert(kv_store_put(store, "multi", multiline, sizeof(multiline) - 1, 0) == 0);
-  assert(kv_store_put(store, "bin", binary, sizeof(binary), 0) == 0);
-  assert(kv_store_put(store, "empty", NULL, 0, 0) == 0);
-  assert(kv_store_put(store, "key with space", "v", 1, 0) == 0);
-  assert(kv_store_put(store, "over", "old", 3, 0) == 0);
-  assert(kv_store_put(store, "over", "new", 3, 0) == 0);
-  assert(kv_store_put(store, "gone", "x", 1, 0) == 0);
-  assert(kv_store_del(store, "gone", 0) == 1);
+  assert(kv_store_put(store, "multi", multiline, sizeof(multiline) - 1, NULL) == 0);
+  assert(kv_store_put(store, "bin", binary, sizeof(binary), NULL) == 0);
+  assert(kv_store_put(store, "empty", NULL, 0, NULL) == 0);
+  assert(kv_store_put(store, "key with space", "v", 1, NULL) == 0);
+  assert(kv_store_put(store, "over", "old", 3, NULL) == 0);
+  assert(kv_store_put(store, "over", "new", 3, NULL) == 0);
+  assert(kv_store_put(store, "gone", "x", 1, NULL) == 0);
+  assert(kv_store_del(store, "gone", NULL) == 1);
   assert(kv_store_free(store) == 0);
 
   store = open_store(db, 10, 1000000);
@@ -82,6 +83,105 @@ static int count_rows(sqlite3 *db, const char *key) {
   return n;
 }
 
+static vstamp stamp(const char *clock, uint64_t ts, int coord) {
+  vstamp s = {.ts = ts, .coord = coord};
+  assert(vclock_decode(clock, strlen(clock), &s.clock) == 0);
+  return s;
+}
+
+/** Assert key holds want (NULL: a tombstone) with clock, ts and coord. */
+static void expect_record(kv_store *store, const char *key, const char *want, const char *clock,
+                          uint64_t ts, int coord) {
+  kv_record r;
+  assert(kv_store_read(store, key, &r) == 1);
+  assert(r.deleted == (want == NULL));
+  assert(r.value_len == (want ? strlen(want) : 0));
+  assert(!want || memcmp(r.value, want, r.value_len) == 0);
+  char text[VCLOCK_TEXT_MAX];
+  (void)vclock_encode(&r.stamp.clock, text);
+  assert(strcmp(text, clock) == 0);
+  assert(r.stamp.ts == ts && r.stamp.coord == coord);
+  free(r.value);
+}
+
+static void test_put_with_a_dominating_clock_replaces_and_a_dominated_one_does_not(const char *db) {
+  kv_store *store = open_store(db, 10, 1000000);
+  assert(store);
+  vstamp first = stamp("1:1", 100, 1);
+  vstamp second = stamp("1:2", 90, 1);
+  assert(kv_store_put(store, "d", "first", 5, &first) == 0);
+  assert(kv_store_put(store, "d", "second", 6, &second) == 0);
+  expect_record(store, "d", "second", "1:2", 90, 1);
+  assert(kv_store_put(store, "d", "first", 5, &first) == 0);
+  expect_record(store, "d", "second", "1:2", 90, 1);
+  assert(kv_store_free(store) == 0);
+  printf("  test_put_with_a_dominating_clock_replaces_and_a_dominated_one_does_not OK\n");
+}
+
+static void test_concurrent_puts_keep_the_winner_with_the_merged_clock(const char *db) {
+  kv_store *store = open_store(db, 10, 1000000);
+  assert(store);
+  vstamp a = stamp("1:1", 100, 1);
+  vstamp b = stamp("2:1", 50, 2);
+  vstamp c = stamp("3:1", 200, 3);
+  assert(kv_store_put(store, "c", "a", 1, &a) == 0);
+  assert(kv_store_put(store, "c", "b", 1, &b) == 0);
+  expect_record(store, "c", "a", "1:1,2:1", 100, 1);
+  assert(kv_store_put(store, "c", "c", 1, &c) == 0);
+  expect_record(store, "c", "c", "1:1,2:1,3:1", 200, 3);
+  assert(kv_store_free(store) == 0);
+  store = open_store(db, 10, 1000000);
+  assert(store);
+  expect_record(store, "c", "c", "1:1,2:1,3:1", 200, 3);
+  assert(kv_store_free(store) == 0);
+  printf("  test_concurrent_puts_keep_the_winner_with_the_merged_clock OK\n");
+}
+
+static void test_tombstone_carries_its_clock(const char *db) {
+  kv_store *store = open_store(db, 10, 1000000);
+  assert(store);
+  vstamp put = stamp("1:2", 10, 1);
+  vstamp stale_del = stamp("1:1", 20, 1);
+  vstamp del = stamp("1:3", 30, 1);
+  assert(kv_store_put(store, "t", "live", 4, &put) == 0);
+  assert(kv_store_del(store, "t", &stale_del) == 1);
+  expect_value(store, "t", "live", 4);
+  assert(kv_store_del(store, "t", &del) == 1);
+  expect_record(store, "t", NULL, "1:3", 30, 1);
+  assert(kv_store_put(store, "t", "live", 4, &put) == 0);
+  assert(kv_store_free(store) == 0);
+  store = open_store(db, 10, 1000000);
+  assert(store);
+  expect_record(store, "t", NULL, "1:3", 30, 1);
+  assert(kv_store_free(store) == 0);
+  printf("  test_tombstone_carries_its_clock OK\n");
+}
+
+static void test_version_column_becomes_the_timestamp_of_an_empty_clock(const char *db) {
+  sqlite3 *old = NULL;
+  assert(sqlite3_open(db, &old) == SQLITE_OK);
+  assert(sqlite3_exec(old,
+                      "CREATE TABLE kv(key TEXT PRIMARY KEY, value BLOB, version INTEGER NOT NULL"
+                      " DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;"
+                      "INSERT INTO kv VALUES('v', CAST('lww' AS BLOB), 42, 0);",
+                      NULL, NULL, NULL) == SQLITE_OK);
+  sqlite3_close(old);
+  kv_store *store = open_store(db, 10, 1000000);
+  assert(store);
+  expect_record(store, "v", "lww", "", 42, 0);
+  vstamp older = stamp("", 41, 0);
+  vstamp clocked = stamp("1:1", 1, 1);
+  assert(kv_store_put(store, "v", "older", 5, &older) == 0);
+  expect_record(store, "v", "lww", "", 42, 0);
+  assert(kv_store_put(store, "v", "clocked", 7, &clocked) == 0);
+  assert(kv_store_free(store) == 0);
+  store = open_store(db, 10, 1000000);
+  assert(store);
+  expect_record(store, "v", "clocked", "1:1", 1, 1);
+  assert(kv_store_free(store) == 0);
+  printf("  test_version_column_becomes_the_timestamp_of_an_empty_clock OK\n");
+}
+
 static void test_failed_commit_keeps_changes(const char *db) {
   kv_store *store = open_store(db, 10, 1000000);
   assert(store);
@@ -91,7 +191,7 @@ static void test_failed_commit_keeps_changes(const char *db) {
   assert(sqlite3_exec(locker, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
 
   atomic_store(&errors, 0);
-  assert(kv_store_put(store, "late", "kept\n", 5, 0) == 0);
+  assert(kv_store_put(store, "late", "kept\n", 5, NULL) == 0);
   struct timespec tick = {.tv_sec = 0, .tv_nsec = 10000000};
   for (int i = 0; i != 500 && atomic_load(&errors) < 2; i++) {
     nanosleep(&tick, NULL);
@@ -116,7 +216,7 @@ static void test_locked_shutdown_is_quick_and_fails(const char *db) {
   sqlite3 *locker = NULL;
   assert(sqlite3_open(db, &locker) == SQLITE_OK);
   assert(sqlite3_exec(locker, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK);
-  assert(kv_store_put(store, "lost", "x", 1, 0) == 0);
+  assert(kv_store_put(store, "lost", "x", 1, NULL) == 0);
 
   struct timespec start, end;
   clock_gettime(CLOCK_MONOTONIC, &start);
@@ -138,8 +238,8 @@ static void test_dropped_table_keeps_changes(const char *db) {
   assert(sqlite3_exec(other, "DROP TABLE kv", NULL, NULL, NULL) == SQLITE_OK);
 
   atomic_store(&errors, 0);
-  assert(kv_store_put(store, "a", "1", 1, 0) == 0);
-  assert(kv_store_put(store, "b", "2", 1, 0) == 0);
+  assert(kv_store_put(store, "a", "1", 1, NULL) == 0);
+  assert(kv_store_put(store, "b", "2", 1, NULL) == 0);
   struct timespec tick = {.tv_sec = 0, .tv_nsec = 10000000};
   for (int i = 0; i != 500 && atomic_load(&errors) < 2; i++) {
     nanosleep(&tick, NULL);
@@ -147,8 +247,9 @@ static void test_dropped_table_keeps_changes(const char *db) {
   assert(atomic_load(&errors) >= 2);
 
   assert(sqlite3_exec(other,
-                      "CREATE TABLE kv(key TEXT PRIMARY KEY, value BLOB, version INTEGER NOT NULL"
-                      " DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID",
+                      "CREATE TABLE kv(key TEXT PRIMARY KEY, value BLOB, ts INTEGER NOT NULL"
+                      " DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, clock TEXT NOT NULL"
+                      " DEFAULT '', coord INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID",
                       NULL, NULL, NULL) == SQLITE_OK);
   sqlite3_close(other);
   assert(kv_store_free(store) == 0);
@@ -164,10 +265,10 @@ static void test_dropped_table_keeps_changes(const char *db) {
 static void test_pending_limit(const char *db) {
   kv_store *store = open_store(db, 3600000, 2);
   assert(store);
-  assert(kv_store_put(store, "p1", "1", 1, 0) == 0);
-  assert(kv_store_put(store, "p2", "2", 1, 0) == 0);
-  assert(kv_store_put(store, "p3", "3", 1, 0) == -2);
-  assert(kv_store_del(store, "p1", 0) == -2);
+  assert(kv_store_put(store, "p1", "1", 1, NULL) == 0);
+  assert(kv_store_put(store, "p2", "2", 1, NULL) == 0);
+  assert(kv_store_put(store, "p3", "3", 1, NULL) == -2);
+  assert(kv_store_del(store, "p1", NULL) == -2);
   void *got = NULL;
   size_t got_len = 0;
   assert(kv_store_get(store, "p3", &got, &got_len) == 0);
@@ -176,8 +277,8 @@ static void test_pending_limit(const char *db) {
 
   store = open_store(db, 10, 2);
   assert(store);
-  assert(kv_store_put(store, "p3", "3", 1, 0) == 0);
-  assert(kv_store_put(store, "p4", "4", 1, 0) == 0);
+  assert(kv_store_put(store, "p3", "3", 1, NULL) == 0);
+  assert(kv_store_put(store, "p4", "4", 1, NULL) == 0);
   struct timespec tick = {.tv_sec = 0, .tv_nsec = 10000000};
   int rc = -2;
   for (int i = 0; i != 500 && rc == -2; i++) {
@@ -203,9 +304,9 @@ static void test_failing_change_does_not_block_others(const char *db) {
   kv_store *store = open_store(db, 3600000, 1000000);
   assert(store);
   atomic_store(&errors, 0);
-  assert(kv_store_put(store, "before", "1", 1, 0) == 0);
-  assert(kv_store_put(store, "bad", "2", 1, 0) == 0);
-  assert(kv_store_put(store, "after", "3", 1, 0) == 0);
+  assert(kv_store_put(store, "before", "1", 1, NULL) == 0);
+  assert(kv_store_put(store, "bad", "2", 1, NULL) == 0);
+  assert(kv_store_put(store, "after", "3", 1, NULL) == 0);
   assert(kv_store_free(store) == -1);
   assert(atomic_load(&errors) >= 1);
 
@@ -228,6 +329,7 @@ int main(void) {
 
   printf("kv_store tests:\n");
   test_values_survive_restart(db);
+  test_put_with_a_dominating_clock_replaces_and_a_dominated_one_does_not(db);
   test_failed_commit_keeps_changes(db);
   test_locked_shutdown_is_quick_and_fails(db);
   test_dropped_table_keeps_changes(db);
@@ -235,11 +337,16 @@ int main(void) {
   char bad_db[sizeof(dir) + 16];
   (void)snprintf(bad_db, sizeof(bad_db), "%s/bad.db", dir);
   test_failing_change_does_not_block_others(bad_db);
+  test_concurrent_puts_keep_the_winner_with_the_merged_clock(db);
+  test_tombstone_carries_its_clock(db);
+  char old_db[sizeof(dir) + 16];
+  (void)snprintf(old_db, sizeof(old_db), "%s/old.db", dir);
+  test_version_column_becomes_the_timestamp_of_an_empty_clock(old_db);
   printf("all kv_store tests passed\n");
 
   char path[sizeof(db) + 8];
   static const char *const suffixes[] = {"", "-wal", "-shm"};
-  const char *const dbs[] = {db, bad_db};
+  const char *const dbs[] = {db, bad_db, old_db};
   for (size_t d = 0; d != sizeof(dbs) / sizeof(dbs[0]); d++) {
     for (size_t i = 0; i != sizeof(suffixes) / sizeof(suffixes[0]); i++) {
       (void)snprintf(path, sizeof(path), "%s%s", dbs[d], suffixes[i]);

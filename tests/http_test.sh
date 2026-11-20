@@ -100,43 +100,53 @@ for _ in 1 2 3; do
   expect 404 "$url/x%0A2026-01-01T00:00:00.000%20ERROR%20forged"
 done
 
-# Versioned writes from cp: last writer wins, a delete leaves a tombstone
-v="x-kv-version"
-expect 200 -X POST -H "$v: 10" -d '{"value":"a"}' "$url/ver"
-expect 200 -X POST -H "$v: 5" -d '{"value":"b"}' "$url/ver"
+# Clocked writes from cp: a dominating clock wins, a dominated one changes nothing, concurrent
+# ones keep the later ts with the merged clock; a delete leaves a tombstone with its clock
+c="x-kv-clock"
+t="x-kv-ts"
+o="x-kv-coord"
+expect 200 -X POST -H "$c: 1:2" -H "$t: 10" -H "$o: 1" -d '{"value":"a"}' "$url/ver"
+expect 200 -X POST -H "$c: 1:1" -H "$t: 50" -H "$o: 1" -d '{"value":"b"}' "$url/ver"
 expect_body '{"value":"a"}' "$url/ver"
-expect 200 -X DELETE -H "$v: 7" "$url/ver"
+expect 200 -X DELETE -H "$c: 1:1" -H "$t: 60" -H "$o: 1" "$url/ver"
 expect_body '{"value":"a"}' "$url/ver"
-expect 200 -X POST -H "$v: 10" -d '{"value":"same"}' "$url/ver"
-expect_body '{"value":"same"}' "$url/ver"
-expect 200 -X DELETE -H "$v: 20" "$url/ver"
+expect 200 -X POST -H "$c: 2:1" -H "$t: 5" -H "$o: 2" -d '{"value":"concurrent"}' "$url/ver"
+expect_body '{"value":"a","clock":"1:2,2:1","ts":10,"coord":1,"deleted":false}' \
+  "$url/_internal/get?key=ver"
+expect 200 -X DELETE -H "$c: 1:3,2:1" -H "$t: 20" -H "$o: 1" "$url/ver"
 expect 404 "$url/ver"
-expect 404 -X DELETE -H "$v: 21" "$url/ver"
-expect 200 -X POST -H "$v: 15" -d '{"value":"old"}' "$url/ver"
+expect 404 -X DELETE -H "$c: 1:4,2:1" -H "$t: 21" -H "$o: 1" "$url/ver"
+expect 200 -X POST -H "$c: 1:3" -H "$t: 99" -H "$o: 1" -d '{"value":"old"}' "$url/ver"
 expect 404 "$url/ver"
-expect 200 -X POST -H "$v: 30" -d '{"value":"c"}' "$url/ver"
+expect_body '{"value":"","clock":"1:4,2:1","ts":21,"coord":1,"deleted":true}' \
+  "$url/_internal/get?key=ver"
+expect 200 -X POST -H "$c: 1:5,2:1" -H "$t: 30" -H "$o: 1" -d '{"value":"c"}' "$url/ver"
 expect_body '{"value":"c"}' "$url/ver"
-expect 400 -X POST -H "$v: x1" -d '{"value":"c"}' "$url/ver"
-expect 400 -X DELETE -H "$v: -1" "$url/ver"
+expect 404 "$url/_internal/get?key=nope"
+expect 400 "$url/_internal/get"
+expect 400 -X POST -H "$c: x1" -d '{"value":"c"}' "$url/ver"
+expect 400 -X POST -H "$t: -1" -d '{"value":"c"}' "$url/ver"
+expect 400 -X DELETE -H "$o: x" "$url/ver"
 
 # Internal API for cp
 expect 200 "$url/_internal/health"
-expect 200 -X POST -d '{"items":[{"key":"b1","value":"x","version":5,"deleted":false},{"key":"b2","value":"","version":5,"deleted":true}]}' "$url/_internal/batch"
+expect 200 -X POST -d '{"items":[{"key":"b1","value":"x","clock":"1:5","ts":5,"coord":1,"deleted":false},{"key":"b2","value":"","clock":"1:5","ts":5,"coord":1,"deleted":true}]}' "$url/_internal/batch"
 expect_body '{"value":"x"}' "$url/b1"
 expect 404 "$url/b2"
-expect 200 -X POST -d '{"items":[{"key":"b1","value":"stale","version":3,"deleted":false}]}' "$url/_internal/batch"
+expect 200 -X POST -d '{"items":[{"key":"b1","value":"stale","clock":"1:3","ts":9,"coord":1,"deleted":false}]}' "$url/_internal/batch"
 expect_body '{"value":"x"}' "$url/b1"
 expect 400 -X POST -d '{"items":[{"key":"b1"}]}' "$url/_internal/batch"
+expect 400 -X POST -d '{"items":[{"key":"b1","value":"x","clock":"z","ts":5,"coord":1,"deleted":false}]}' "$url/_internal/batch"
 expect 400 -X POST -d 'nope' "$url/_internal/batch"
 sleep 0.5
-expect_body '{"items":[{"key":"b1","value":"x","version":5,"deleted":false},{"key":"b2","value":"","version":5,"deleted":true}],"next":"b2"}' "$url/_internal/dump?cursor=b0&limit=2"
+expect_body '{"items":[{"key":"b1","value":"x","clock":"1:5","ts":5,"coord":1,"deleted":false},{"key":"b2","value":"","clock":"1:5","ts":5,"coord":1,"deleted":true}],"next":"b2"}' "$url/_internal/dump?cursor=b0&limit=2"
 # Earlier deletes left tombstones for "test" and "é"
-expect_body '{"items":[{"key":"b2","value":"","version":5,"deleted":true},{"key":"test","value":"","version":0,"deleted":true},{"key":"ver","value":"c","version":30,"deleted":false},{"key":"é","value":"","version":0,"deleted":true}],"next":null}' "$url/_internal/dump?cursor=b1&limit=10"
+expect_body '{"items":[{"key":"b2","value":"","clock":"1:5","ts":5,"coord":1,"deleted":true},{"key":"test","value":"","clock":"","ts":0,"coord":0,"deleted":true},{"key":"ver","value":"c","clock":"1:5,2:1","ts":30,"coord":1,"deleted":false},{"key":"é","value":"","clock":"","ts":0,"coord":0,"deleted":true}],"next":null}' "$url/_internal/dump?cursor=b1&limit=10"
 expect 400 "$url/_internal/dump?limit=0"
 expect 200 -X POST -d '{"keys":["b1"]}' "$url/_internal/delete-batch"
 expect 404 "$url/b1"
 sleep 0.5
-expect_body '{"items":[{"key":"b2","value":"","version":5,"deleted":true}],"next":"b2"}' "$url/_internal/dump?cursor=b0&limit=1"
+expect_body '{"items":[{"key":"b2","value":"","clock":"1:5","ts":5,"coord":1,"deleted":true}],"next":"b2"}' "$url/_internal/dump?cursor=b0&limit=1"
 
 kill -TERM "$pid"
 status=0

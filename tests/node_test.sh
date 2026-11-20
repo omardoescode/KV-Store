@@ -42,19 +42,34 @@ expect_body() {
   [ "$got" = "$want" ] || fail "want body $want, got $got: curl $*"
 }
 
+# A database with LWW versions loads each version as the ts of an empty clock; a write with a
+# clock dominates it
+sqlite3 "$KV_DB_PATH" "CREATE TABLE kv(key TEXT PRIMARY KEY, value BLOB,
+  version INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
+  INSERT INTO kv VALUES('lww', CAST('v' AS BLOB), 42, 0);"
+start
+expect_body '{"value":"v","clock":"","ts":42,"coord":0,"deleted":false}' "$url/_internal/get?key=lww"
+curl -sf -X POST -H 'x-kv-clock: 2:1' -H 'x-kv-ts: 7' -H 'x-kv-coord: 2' -d '{"value":"new"}' \
+  "$url/lww"
+curl -sf -X POST "$url/_internal/flush"
+expect_body '{"items":[{"key":"lww","value":"new","clock":"2:1","ts":7,"coord":2,"deleted":false}],"next":null}' \
+  "$url/_internal/dump"
+stop
+rm -f "$KV_DB_PATH"*
+
 # A database from before versions loads with version 0 and no tombstones
 sqlite3 "$KV_DB_PATH" "CREATE TABLE kv(key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID;
   INSERT INTO kv VALUES('old', CAST('v' AS BLOB));"
 start
 expect_body '{"value":"v"}' "$url/old"
-expect_body '{"items":[{"key":"old","value":"v","version":0,"deleted":false}],"next":null}' \
+expect_body '{"items":[{"key":"old","value":"v","clock":"","ts":0,"coord":0,"deleted":false}],"next":null}' \
   "$url/_internal/dump"
 
 # A paused purge keeps tombstones past the TTL; a resumed one removes them
 curl -sf -X POST -d '{"paused":true}' "$url/_internal/purge"
 curl -sf -X DELETE "$url/old"
 sleep 2.5
-expect_body '{"items":[{"key":"old","value":"","version":0,"deleted":true}],"next":null}' \
+expect_body '{"items":[{"key":"old","value":"","clock":"","ts":0,"coord":0,"deleted":true}],"next":null}' \
   "$url/_internal/dump"
 curl -sf -X POST -d '{"paused":false}' "$url/_internal/purge"
 sleep 2.5
@@ -69,7 +84,7 @@ start
 curl -sf -X POST -d '{"value":"f"}' "$url/fl"
 expect_body '{"items":[],"next":null}' "$url/_internal/dump"
 curl -sf -X POST "$url/_internal/flush"
-expect_body '{"items":[{"key":"fl","value":"f","version":0,"deleted":false}],"next":null}' \
+expect_body '{"items":[{"key":"fl","value":"f","clock":"","ts":0,"coord":0,"deleted":false}],"next":null}' \
   "$url/_internal/dump"
 stop
 
@@ -78,10 +93,10 @@ rm -f "$KV_DB_PATH"*
 export KV_FLUSH_INTERVAL_MS=300 KV_SYNC_ACK=1
 start
 curl -sf -X POST -d '{"value":"s"}' "$url/sa"
-expect_body '{"items":[{"key":"sa","value":"s","version":0,"deleted":false}],"next":null}' \
+expect_body '{"items":[{"key":"sa","value":"s","clock":"","ts":0,"coord":0,"deleted":false}],"next":null}' \
   "$url/_internal/dump"
 curl -sf -X DELETE "$url/sa"
-expect_body '{"items":[{"key":"sa","value":"","version":0,"deleted":true}],"next":null}' \
+expect_body '{"items":[{"key":"sa","value":"","clock":"","ts":0,"coord":0,"deleted":true}],"next":null}' \
   "$url/_internal/dump"
 stop
 

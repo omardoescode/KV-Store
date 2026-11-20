@@ -6,6 +6,7 @@
 
 #include "hashmap/hashmap.h"
 #include "log/log.h"
+#include "vclock/vclock.h"
 
 typedef struct kv_store kv_store;
 
@@ -27,20 +28,29 @@ typedef struct {
   const char *key;
   const void *value;
   size_t value_len;
-  uint64_t version;
+  vstamp stamp;
   bool deleted;
 } kv_dump_row;
+
+/** The entry of one key, a tombstone too, given by kv_store_read. */
+typedef struct {
+  /** malloc'd, NULL if empty; the caller frees it. */
+  void *value;
+  size_t value_len;
+  vstamp stamp;
+  bool deleted;
+} kv_record;
 
 /** Called per row by kv_store_dump; nonzero stops the dump with an error. */
 typedef int (*kv_dump_fn)(void *ctx, const kv_dump_row *row);
 
 /**
- * Load every row of the SQLite database at opt->db_path into memory, adding the version and
- * deleted columns to an older database, then start a writer thread that commits queued changes
- * every flush_interval_ms and, once per second, purges tombstones older than the TTL. The writer
- * thread reports failed commits to log; it keeps the changes and retries them, but drops a change
- * that cannot commit whatever the database state. Put and delete fail while max_pending changes
- * wait for the database. Returns NULL on error.
+ * Load every row of the SQLite database at opt->db_path into memory, upgrading an older database
+ * (its version column becomes the ts of an empty clock), then start a writer thread that commits
+ * queued changes every flush_interval_ms and, once per second, purges tombstones older than the
+ * TTL. The writer thread reports failed commits to log; it keeps the changes and retries them, but
+ * drops a change that cannot commit whatever the database state. Put and delete fail while
+ * max_pending changes wait for the database. Returns NULL on error.
  */
 kv_store *kv_store_new(const kv_store_options *opt, logger log);
 
@@ -57,24 +67,29 @@ int kv_store_free(kv_store *store);
 int kv_store_get(kv_store *store, const char *key, void **out_value, size_t *out_len);
 
 /**
- * Stores a copy of value under the key with version and queues it for the database, unless the
- * stored version is higher (last writer wins; the put is then ignored). Does no IO.
+ * Read key's entry, a tombstone too, into *out. Returns 1 on found, 0 on missing, -1 on error.
+ */
+int kv_store_read(kv_store *store, const char *key, kv_record *out);
+
+/**
+ * Store a copy of value under the key with stamp (NULL: the empty clock, ts 0, coord 0) and queue
+ * it for the database, by the winner rule of vstamp_pick against the stored entry: the stored
+ * entry keeps the winner, with the merge of both clocks. Does no IO.
  * Returns 0 on success or ignore, -1 on error, -2 if max_pending changes wait (the map is
  * unchanged).
  */
 int kv_store_put(kv_store *store, const char *key, const void *value, size_t value_len,
-                 uint64_t version);
+                 const vstamp *stamp);
 
 /**
- * Replaces the key with a tombstone of version and queues it for the database, unless the
- * stored version is higher (the delete is then ignored). Does no IO.
- * Returns 1 if a value was removed or the delete was ignored, 0 if no value was there, -1 on
+ * Replace the key with a tombstone of stamp like kv_store_put. Does no IO.
+ * Returns 1 if a value was removed or the stored entry won, 0 if no value was there, -1 on
  * error, -2 if max_pending changes wait (the map is unchanged).
  */
-int kv_store_del(kv_store *store, const char *key, uint64_t version);
+int kv_store_del(kv_store *store, const char *key, const vstamp *stamp);
 
 /**
- * Remove key and its tombstone, with no version check, and queue the removal. Does no IO.
+ * Remove key and its tombstone, with no clock check, and queue the removal. Does no IO.
  * Returns 1 if removed, 0 if missing, -1 on error, -2 if max_pending changes wait.
  */
 int kv_store_remove(kv_store *store, const char *key);

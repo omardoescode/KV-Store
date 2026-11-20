@@ -10,7 +10,7 @@ enum { FAKE_NODES = 16, FAKE_ROWS = 64, FAKE_LEN = 32, FAKE_PORT = 9100 };
 typedef struct {
   char key[FAKE_LEN];
   char value[FAKE_LEN];
-  int64_t version;
+  vstamp stamp;
   bool deleted;
 } fake_row;
 
@@ -22,11 +22,11 @@ typedef struct {
 } fake_node;
 
 static fake_node nodes[FAKE_NODES];
-static int64_t clock_version;
+static uint64_t writes;
 
 void fake_reset(void) {
   memset(nodes, 0, sizeof(nodes));
-  clock_version = 0;
+  writes = 0;
   fake_fault("", -1);
 }
 
@@ -56,22 +56,36 @@ static fake_row *find(fake_node *n, const char *key, size_t len) {
 
 static void put(fake_node *n, const node_row *r) {
   fake_row *row = find(n, r->key, r->key_len);
+  vstamp winner = r->stamp;
   if (!row) {
     if (n->n == FAKE_ROWS) {
       abort();
     }
     row = &n->rows[n->n++];
     (void)snprintf(row->key, sizeof(row->key), "%.*s", (int)r->key_len, r->key);
-  } else if (row->version >= r->version) {
-    return;
+  } else {
+    int pick = vstamp_pick(&r->stamp, &row->stamp, &winner);
+    if (pick < 0) {
+      abort();
+    }
+    if (pick == 1) {
+      row->stamp = winner;
+      return;
+    }
   }
   (void)snprintf(row->value, sizeof(row->value), "%.*s", (int)r->value_len, r->value);
-  row->version = r->version;
+  row->stamp = winner;
   row->deleted = r->deleted;
 }
 
 void fake_put(int id, const char *key, const char *value) {
-  node_row r = {key, strlen(key), value, strlen(value), ++clock_version, false};
+  writes++;
+  node_row r = {key, strlen(key), value, strlen(value), {{1, {{1, writes}}}, writes, 1}, false};
+  put(&nodes[id], &r);
+}
+
+void fake_put_stamp(int id, const char *key, const char *value, int coord, uint64_t ts) {
+  node_row r = {key, strlen(key), value, strlen(value), {{1, {{coord, 1}}}, ts, coord}, false};
   put(&nodes[id], &r);
 }
 
@@ -102,8 +116,7 @@ int node_dump(const char *addr, node_page_fn fn, void *arg) {
   node_row rows[FAKE_ROWS];
   for (size_t i = 0; i != n->n; i++) {
     const fake_row *r = &n->rows[i];
-    rows[i] =
-        (node_row){r->key, strlen(r->key), r->value, strlen(r->value), r->version, r->deleted};
+    rows[i] = (node_row){r->key, strlen(r->key), r->value, strlen(r->value), r->stamp, r->deleted};
   }
   return fn(arg, rows, n->n) == 0 ? 0 : -1;
 }

@@ -17,21 +17,31 @@
 // Longest pause between shutdown commit attempts, so a long flush interval cannot stall exit.
 #define KV_STORE_FINAL_RETRY_MS 100
 
-/** The prefix of each map value; the value bytes follow it. deleted: unix ms, 0 if live. */
+/**
+ * The prefix of each map value; clock_len clock entries (vclock_entry), then the value bytes,
+ * follow it. deleted: unix ms, 0 if live.
+ */
 typedef struct {
-  uint64_t version;
+  uint64_t ts;
   int64_t deleted;
+  int32_t coord;
+  uint32_t clock_len;
 } entry_head;
 
-/** One queued put (deleted 0) or tombstone, in one allocation: key, then '\0', then value. */
+/**
+ * One queued put (deleted 0) or tombstone, in one allocation: key, '\0', the clock text, '\0',
+ * then the value.
+ */
 typedef struct change {
   struct change *next;
   // Removes the row instead of writing it.
   bool remove;
-  uint64_t version;
+  uint64_t ts;
+  int coord;
   // Unix ms of the delete, 0 for a put.
   int64_t deleted;
   size_t value_len;
+  char *clock;
   char *value;
   char key[];
 } change;
@@ -88,19 +98,25 @@ struct kv_store {
   size_t dropped;
 };
 
-static change *change_new(const char *key, const void *value, size_t value_len, entry_head head) {
+static change *change_new(const char *key, const void *value, size_t value_len, const vstamp *stamp,
+                          int64_t deleted) {
+  char clock[VCLOCK_TEXT_MAX];
+  size_t clock_len = vclock_encode(&stamp->clock, clock);
   size_t key_len = strlen(key);
-  change *c = malloc(sizeof(*c) + key_len + 1 + value_len);
+  change *c = malloc(sizeof(*c) + key_len + 1 + clock_len + 1 + value_len);
   if (!c) {
     return NULL;
   }
   c->next = NULL;
   c->remove = false;
-  c->version = head.version;
-  c->deleted = head.deleted;
+  c->ts = stamp->ts;
+  c->coord = stamp->coord;
+  c->deleted = deleted;
   c->value_len = value_len;
   memcpy(c->key, key, key_len + 1);
-  c->value = c->key + key_len + 1;
+  c->clock = c->key + key_len + 1;
+  memcpy(c->clock, clock, clock_len + 1);
+  c->value = c->clock + clock_len + 1;
   if (value_len) {
     memcpy(c->value, value, value_len);
   }
@@ -125,18 +141,23 @@ static void enqueue(kv_store *store, change *c) {
   }
 }
 
-/** Put head and value_len bytes of value under key in the map. Returns 0, or -1 on error. */
-static int map_put(hashmap *map, const char *key, entry_head head, const void *value,
-                   size_t value_len) {
+/** Put stamp, deleted and value_len bytes of value under key in the map. Returns 0 or -1. */
+static int map_put(hashmap *map, const char *key, const vstamp *stamp, int64_t deleted,
+                   const void *value, size_t value_len) {
+  entry_head head = {stamp->ts, deleted, stamp->coord, (uint32_t)stamp->clock.len};
+  size_t clock_bytes = stamp->clock.len * sizeof(vclock_entry);
   unsigned char stack[256];
-  size_t len = sizeof(head) + value_len;
+  size_t len = sizeof(head) + clock_bytes + value_len;
   unsigned char *buf = len <= sizeof(stack) ? stack : malloc(len);
   if (!buf) {
     return -1;
   }
   memcpy(buf, &head, sizeof(head));
+  if (clock_bytes) {
+    memcpy(buf + sizeof(head), stamp->clock.e, clock_bytes);
+  }
   if (value_len) {
-    memcpy(buf + sizeof(head), value, value_len);
+    memcpy(buf + sizeof(head) + clock_bytes, value, value_len);
   }
   int rc = hashmap_put(map, key, buf, len);
   if (buf != stack) {
@@ -146,10 +167,37 @@ static int map_put(hashmap *map, const char *key, entry_head head, const void *v
 }
 
 /**
- * Read the head of key's map entry into *head. Returns 1 if found, 0 if missing, -1 on error.
- * If value is not NULL, set *value to a malloc buffer that holds the value at its start.
+ * Decode the map entry raw of len bytes into *stamp and *deleted, and set *value_at to the offset
+ * of its value. Returns 0, or -1 if malformed.
  */
-static int map_get(hashmap *map, const char *key, entry_head *head, void **value,
+static int decode_entry(const void *raw, size_t len, vstamp *stamp, int64_t *deleted,
+                        size_t *value_at) {
+  entry_head head;
+  if (len < sizeof(head)) {
+    return -1;
+  }
+  memcpy(&head, raw, sizeof(head));
+  size_t clock_bytes = (size_t)head.clock_len * sizeof(vclock_entry);
+  if (head.clock_len > VCLOCK_MAX || len < sizeof(head) + clock_bytes) {
+    return -1;
+  }
+  stamp->ts = head.ts;
+  stamp->coord = head.coord;
+  stamp->clock.len = head.clock_len;
+  if (clock_bytes) {
+    memcpy(stamp->clock.e, (const unsigned char *)raw + sizeof(head), clock_bytes);
+  }
+  *deleted = head.deleted;
+  *value_at = sizeof(head) + clock_bytes;
+  return 0;
+}
+
+/**
+ * Read the stamp and deleted of key's map entry into *stamp and *deleted. Returns 1 if found, 0 if
+ * missing, -1 on error. If value is not NULL, set *value to a malloc buffer (NULL if empty) that
+ * holds the value.
+ */
+static int map_get(hashmap *map, const char *key, vstamp *stamp, int64_t *deleted, void **value,
                    size_t *value_len) {
   void *raw = NULL;
   size_t len = 0;
@@ -157,14 +205,14 @@ static int map_get(hashmap *map, const char *key, entry_head *head, void **value
   if (rc != 1) {
     return rc;
   }
-  if (len < sizeof(*head)) {
+  size_t at = 0;
+  if (decode_entry(raw, len, stamp, deleted, &at) != 0) {
     free(raw);
     return -1;
   }
-  memcpy(head, raw, sizeof(*head));
-  if (value) {
-    *value_len = len - sizeof(*head);
-    memmove(raw, (unsigned char *)raw + sizeof(*head), *value_len);
+  if (value && len > at) {
+    *value_len = len - at;
+    memmove(raw, (unsigned char *)raw + at, *value_len);
     *value = raw;
   } else {
     free(raw);
@@ -178,19 +226,32 @@ static int64_t now_ms(void) {
   return ((int64_t)ts.tv_sec * 1000) + (ts.tv_nsec / 1000000);
 }
 
+/**
+ * Decode the stamp in the columns ts, clock and coord of stmt, from column ts on. Returns 0, or -1
+ * if the clock is malformed.
+ */
+static int column_stamp(sqlite3_stmt *stmt, int ts, vstamp *out) {
+  out->ts = (uint64_t)sqlite3_column_int64(stmt, ts);
+  out->coord = sqlite3_column_int(stmt, ts + 2);
+  const char *clock = (const char *)sqlite3_column_text(stmt, ts + 1);
+  return vclock_decode(clock ? clock : "", (size_t)sqlite3_column_bytes(stmt, ts + 1), &out->clock);
+}
+
 static int load_rows(kv_store *store) {
   sqlite3_stmt *select = NULL;
-  if (sqlite3_prepare_v2(store->db, "SELECT key, value, version, deleted FROM kv", -1, &select,
-                         NULL) != SQLITE_OK) {
+  if (sqlite3_prepare_v2(store->db, "SELECT key, value, deleted, ts, clock, coord FROM kv", -1,
+                         &select, NULL) != SQLITE_OK) {
     return -1;
   }
   int rc;
+  vstamp stamp;
   while ((rc = sqlite3_step(select)) == SQLITE_ROW) {
     const unsigned char *key = sqlite3_column_text(select, 0);
     const void *value = sqlite3_column_blob(select, 1);
     size_t value_len = (size_t)sqlite3_column_bytes(select, 1);
-    entry_head head = {(uint64_t)sqlite3_column_int64(select, 2), sqlite3_column_int64(select, 3)};
-    if (!key || map_put(store->map, (const char *)key, head, value, value_len) != 0) {
+    if (!key || column_stamp(select, 3, &stamp) != 0 ||
+        map_put(store->map, (const char *)key, &stamp, sqlite3_column_int64(select, 2), value,
+                value_len) != 0) {
       break;
     }
   }
@@ -198,30 +259,44 @@ static int load_rows(kv_store *store) {
   return rc == SQLITE_DONE ? 0 : -1;
 }
 
-/** Add the version and deleted columns to a kv table made before they existed. */
-static int upgrade_schema(sqlite3 *db) {
+/** Return 1 if the kv table has the column name, 0 if not, -1 on error. */
+static int has_column(sqlite3 *db, const char *name) {
   sqlite3_stmt *stmt = NULL;
-  if (sqlite3_prepare_v2(db, "SELECT count(*) FROM pragma_table_info('kv') WHERE name = 'version'",
-                         -1, &stmt, NULL) != SQLITE_OK) {
+  if (sqlite3_prepare_v2(db, "SELECT count(*) FROM pragma_table_info('kv') WHERE name = ?1", -1,
+                         &stmt, NULL) != SQLITE_OK) {
     return -1;
   }
+  (void)sqlite3_bind_text(stmt, 1, name, -1, SQLITE_STATIC);
   int rc = sqlite3_step(stmt);
-  int has_version = rc == SQLITE_ROW && sqlite3_column_int(stmt, 0) == 1;
+  int has = rc == SQLITE_ROW ? sqlite3_column_int(stmt, 0) == 1 : -1;
   sqlite3_finalize(stmt);
-  if (rc != SQLITE_ROW) {
+  return has;
+}
+
+/**
+ * Bring a kv table of an older node up to date: a table from before versions gets the ts and
+ * deleted columns; the LWW version column becomes ts, under an empty clock; then the clock and
+ * coord columns are added.
+ */
+static int upgrade_schema(sqlite3 *db) {
+  int has_ts = has_column(db, "ts");
+  int has_version = has_column(db, "version");
+  int has_clock = has_column(db, "clock");
+  if (has_ts < 0 || has_version < 0 || has_clock < 0) {
     return -1;
   }
-  if (has_version) {
-    return 0;
+  const char *ts = "";
+  if (!has_ts) {
+    ts = has_version ? "ALTER TABLE kv RENAME COLUMN version TO ts;"
+                     : "ALTER TABLE kv ADD COLUMN ts INTEGER NOT NULL DEFAULT 0;"
+                       "ALTER TABLE kv ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;";
   }
-  return sqlite3_exec(db,
-                      "BEGIN;"
-                      "ALTER TABLE kv ADD COLUMN version INTEGER NOT NULL DEFAULT 0;"
-                      "ALTER TABLE kv ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0;"
-                      "COMMIT;",
-                      NULL, NULL, NULL) == SQLITE_OK
-             ? 0
-             : -1;
+  const char *clock = has_clock ? ""
+                                : "ALTER TABLE kv ADD COLUMN clock TEXT NOT NULL DEFAULT '';"
+                                  "ALTER TABLE kv ADD COLUMN coord INTEGER NOT NULL DEFAULT 0;";
+  char sql[512];
+  (void)snprintf(sql, sizeof(sql), "BEGIN;%s%sCOMMIT;", ts, clock);
+  return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
 }
 
 /**
@@ -250,10 +325,16 @@ static int bind_change(sqlite3_stmt *stmt, const change *c) {
     rc = sqlite3_bind_blob64(stmt, 2, c->value, c->value_len, SQLITE_STATIC);
   }
   if (rc == SQLITE_OK) {
-    rc = sqlite3_bind_int64(stmt, 3, (sqlite3_int64)c->version);
+    rc = sqlite3_bind_int64(stmt, 3, (sqlite3_int64)c->ts);
   }
   if (rc == SQLITE_OK) {
     rc = sqlite3_bind_int64(stmt, 4, c->deleted);
+  }
+  if (rc == SQLITE_OK) {
+    rc = sqlite3_bind_text(stmt, 5, c->clock, -1, SQLITE_STATIC);
+  }
+  if (rc == SQLITE_OK) {
+    rc = sqlite3_bind_int(stmt, 6, c->coord);
   }
   return rc;
 }
@@ -355,10 +436,11 @@ static void purge(kv_store *store) {
   while ((rc = sqlite3_step(store->purge_select)) == SQLITE_ROW) {
     const char *key = (const char *)sqlite3_column_text(store->purge_select, 0);
     int64_t stamp = sqlite3_column_int64(store->purge_select, 1);
-    entry_head head;
+    vstamp head;
+    int64_t deleted = 0;
     pthread_mutex_lock(&store->mu);
     // A newer put or delete keeps its map entry; the database row then waits for its change.
-    if (key && map_get(store->map, key, &head, NULL, NULL) == 1 && head.deleted == stamp) {
+    if (key && map_get(store->map, key, &head, &deleted, NULL, NULL) == 1 && deleted == stamp) {
       (void)hashmap_del(store->map, key);
     }
     pthread_mutex_unlock(&store->mu);
@@ -502,14 +584,17 @@ kv_store *kv_store_new(const kv_store_options *opt, logger log) {
                    "PRAGMA journal_mode=WAL;"
                    "PRAGMA synchronous=FULL;"
                    "CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value BLOB,"
-                   " version INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0)"
+                   " ts INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0,"
+                   " clock TEXT NOT NULL DEFAULT '', coord INTEGER NOT NULL DEFAULT 0)"
                    " WITHOUT ROWID;",
                    NULL, NULL, NULL) != SQLITE_OK ||
       upgrade_schema(store->db) != 0 ||
       sqlite3_prepare_v2(store->db,
-                         "INSERT INTO kv(key, value, version, deleted) VALUES(?1, ?2, ?3, ?4)"
+                         "INSERT INTO kv(key, value, ts, deleted, clock, coord)"
+                         " VALUES(?1, ?2, ?3, ?4, ?5, ?6)"
                          " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
-                         " version = excluded.version, deleted = excluded.deleted",
+                         " ts = excluded.ts, deleted = excluded.deleted,"
+                         " clock = excluded.clock, coord = excluded.coord",
                          -1, &store->upsert, NULL) != SQLITE_OK ||
       sqlite3_prepare_v2(store->db, "DELETE FROM kv WHERE key = ?1", -1, &store->remove, NULL) !=
           SQLITE_OK ||
@@ -521,7 +606,7 @@ kv_store *kv_store_new(const kv_store_options *opt, logger log) {
       sqlite3_open_v2(db_path, &store->reader, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK ||
       sqlite3_busy_timeout(store->reader, 1000) != SQLITE_OK ||
       sqlite3_prepare_v2(store->reader,
-                         "SELECT key, value, version, deleted FROM kv WHERE key > ?1"
+                         "SELECT key, value, deleted, ts, clock, coord FROM kv WHERE key > ?1"
                          " ORDER BY key LIMIT ?2",
                          -1, &store->dump, NULL) != SQLITE_OK ||
       load_rows(store) != 0) {
@@ -571,77 +656,99 @@ int kv_store_free(kv_store *store) {
 }
 
 int kv_store_get(kv_store *store, const char *key, void **out_value, size_t *out_len) {
-  entry_head head;
-  void *value = NULL;
-  size_t len = 0;
-  int rc = map_get(store->map, key, &head, &value, &len);
-  if (rc != 1 || head.deleted) {
-    free(value);
+  kv_record r;
+  int rc = kv_store_read(store, key, &r);
+  if (rc != 1 || r.deleted) {
+    free(r.value);
     *out_value = NULL;
     *out_len = 0;
     return rc == 1 ? 0 : rc;
   }
-  if (len == 0) {
-    free(value);
-    value = NULL;
-  }
-  *out_value = value;
-  *out_len = len;
+  *out_value = r.value;
+  *out_len = r.value_len;
   return 1;
 }
 
+int kv_store_read(kv_store *store, const char *key, kv_record *out) {
+  int64_t deleted = 0;
+  out->value = NULL;
+  out->value_len = 0;
+  int rc = map_get(store->map, key, &out->stamp, &deleted, &out->value, &out->value_len);
+  out->deleted = deleted != 0;
+  return rc;
+}
+
 /**
- * Apply a put (deleted 0) or tombstone with version to the map and queue it, unless the stored
- * version is higher. Map and queue change under one lock so the queue holds changes in map order,
- * and the database ends with the entry the map holds. Returns 1 if applied and a live value was
- * there before, 0 if applied and none was, 2 if ignored, -1 on error, -2 if max_pending changes
- * wait (the map is unchanged).
+ * Put the entry under key in the map and queue it. Call with mu held. Returns 0, or -1 (the map
+ * may be changed).
  */
-static int apply(kv_store *store, const char *key, const void *value, size_t value_len,
-                 entry_head head) {
-  change *c = change_new(key, value, value_len, head);
-  if (!c) {
+static int store_entry(kv_store *store, const char *key, const vstamp *stamp, int64_t deleted,
+                       const void *value, size_t value_len) {
+  change *c = change_new(key, value, value_len, stamp, deleted);
+  if (!c || map_put(store->map, key, stamp, deleted, value, value_len) != 0) {
+    free(c);
     return -1;
   }
+  enqueue(store, c);
+  return 0;
+}
+
+/**
+ * Apply a put (deleted 0) or tombstone with stamp (NULL: empty) to the map by the winner rule and
+ * queue the entry. Map and queue change under one lock so the queue holds changes in map order,
+ * and the database ends with the entry the map holds. Returns 1 if the change won and a live value
+ * was there before, 0 if it won and none was, 2 if the stored entry won, -1 on error, -2 if
+ * max_pending changes wait (the map is unchanged).
+ */
+static int apply(kv_store *store, const char *key, const void *value, size_t value_len,
+                 const vstamp *stamp, int64_t deleted) {
+  static const vstamp none = {0};
+  stamp = stamp ? stamp : &none;
+  vstamp old;
+  vstamp winner;
+  int64_t old_deleted = 0;
+  void *old_value = NULL;
+  size_t old_len = 0;
   pthread_mutex_lock(&store->mu);
-  entry_head old = {0, 0};
   int status = -2;
   if (store->queued + store->in_batch < store->max_pending) {
-    int found = map_get(store->map, key, &old, NULL, NULL);
-    if (found < 0) {
+    int found = map_get(store->map, key, &old, &old_deleted, &old_value, &old_len);
+    int pick = found == 1 ? vstamp_pick(stamp, &old, &winner) : 0;
+    if (found < 0 || pick < 0) {
       status = -1;
-    } else if (found && head.version < old.version) {
-      status = 2;
+    } else if (pick == 0) {
+      status = found && !old_deleted ? 1 : 0;
+      if (store_entry(store, key, found == 1 ? &winner : stamp, deleted, value, value_len) != 0) {
+        status = -1;
+      }
     } else {
-      status = found && !old.deleted ? 1 : 0;
-      if (map_put(store->map, key, head, value, value_len) != 0) {
+      status = 2;
+      // A concurrent change lost, but the stored clock takes in its clock.
+      if (vclock_compare(&winner.clock, &old.clock) != VCLOCK_EQUAL &&
+          store_entry(store, key, &winner, old_deleted, old_value, old_len) != 0) {
         status = -1;
       }
     }
   }
-  if (status == 0 || status == 1) {
-    enqueue(store, c);
-  }
   pthread_mutex_unlock(&store->mu);
-  if (status != 0 && status != 1) {
-    free(c);
-  }
+  free(old_value);
   return status;
 }
 
 int kv_store_put(kv_store *store, const char *key, const void *value, size_t value_len,
-                 uint64_t version) {
-  int rc = apply(store, key, value, value_len, (entry_head){version, 0});
+                 const vstamp *stamp) {
+  int rc = apply(store, key, value, value_len, stamp, 0);
   return rc >= 0 ? 0 : rc;
 }
 
-int kv_store_del(kv_store *store, const char *key, uint64_t version) {
-  int rc = apply(store, key, NULL, 0, (entry_head){version, now_ms()});
+int kv_store_del(kv_store *store, const char *key, const vstamp *stamp) {
+  int rc = apply(store, key, NULL, 0, stamp, now_ms());
   return rc == 2 ? 1 : rc;
 }
 
 int kv_store_remove(kv_store *store, const char *key) {
-  change *c = change_new(key, NULL, 0, (entry_head){0, 0});
+  static const vstamp none = {0};
+  change *c = change_new(key, NULL, 0, &none, 0);
   if (!c) {
     return -1;
   }
@@ -673,10 +780,9 @@ int kv_store_dump(kv_store *store, const char *after, size_t limit, kv_dump_fn f
         .key = (const char *)sqlite3_column_text(stmt, 0),
         .value = sqlite3_column_blob(stmt, 1),
         .value_len = (size_t)sqlite3_column_bytes(stmt, 1),
-        .version = (uint64_t)sqlite3_column_int64(stmt, 2),
-        .deleted = sqlite3_column_int64(stmt, 3) != 0,
+        .deleted = sqlite3_column_int64(stmt, 2) != 0,
     };
-    if (!row.key || fn(ctx, &row) != 0) {
+    if (!row.key || column_stamp(stmt, 3, &row.stamp) != 0 || fn(ctx, &row) != 0) {
       rc = SQLITE_ERROR;
       break;
     }
