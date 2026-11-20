@@ -48,6 +48,7 @@ struct http_server {
   // http_server_stop writes to stop_pipe[1]; each event loop polls its own dup of stop_pipe[0],
   // which stays readable once written, so a stop before the loops start is not lost.
   int stop_pipe[2];
+  void (*worker_exit)(void);
 };
 
 // The rest of the middleware chain of one request: server middleware, then group middleware.
@@ -225,6 +226,7 @@ http_server *http_server_new(void) {
   s->middleware = (middleware_list){NULL, 0};
   s->groups = NULL;
   s->bindings = NULL;
+  s->worker_exit = NULL;
   if (pipe2(s->stop_pipe, O_CLOEXEC | O_NONBLOCK) != 0) {
     h2o_fatal("pipe2: %s", strerror(errno));
   }
@@ -264,6 +266,8 @@ void http_server_free(http_server *s) {
   close(s->stop_pipe[1]);
   free(s);
 }
+
+void http_on_worker_exit(http_server *s, void (*fn)(void)) { s->worker_exit = fn; }
 
 void http_server_stop(http_server *s) {
   int saved = errno;
@@ -426,6 +430,9 @@ static void *run_worker(void *arg) {
   }
   if (w->listener != NULL) {
     h2o_socket_close(w->listener);
+  }
+  if (w->server->worker_exit) {
+    w->server->worker_exit();
   }
   // A connection still open after the grace period keeps the loop: disposing would free under it.
   current_ctx = NULL;

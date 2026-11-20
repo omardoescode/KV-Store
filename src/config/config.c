@@ -133,9 +133,8 @@ int cp_config_load(cp_config *cfg) {
       env_range("KV_CP_MAX_NODES", &max_nodes, 1, 1024) != 0) {
     return -1;
   }
-  long min_nodes = initial;
-  if (env_range("KV_CP_MIN_NODES", &min_nodes, 1, 1024) != 0 ||
-      env_range("KV_CP_REPLICAS", &replicas, 1, 1024) != 0 ||
+  // 16 = RING_MAX_REPLICAS: the ring keeps at most 16 replicas of a key.
+  if (env_range("KV_CP_REPLICAS", &replicas, 1, 16) != 0 ||
       env_range("KV_CP_VNODES", &vnodes, 1, 4096) != 0 ||
       env_range("KV_CP_SCALE_RPS", &scale_rps, 0, 1000000000) != 0 ||
       env_range("KV_CP_SCALE_WINDOW_S", &window_s, 1, 3600) != 0 ||
@@ -151,16 +150,13 @@ int cp_config_load(cp_config *cfg) {
                   replicas, initial);
     return -1;
   }
-  if (initial > max_nodes || min_nodes > max_nodes) {
-    (void)fprintf(stderr,
-                  "config: KV_CP_INITIAL_NODES=%ld and KV_CP_MIN_NODES=%ld must be <= "
-                  "KV_CP_MAX_NODES=%ld\n",
-                  initial, min_nodes, max_nodes);
+  if (initial > max_nodes) {
+    (void)fprintf(stderr, "config: KV_CP_INITIAL_NODES=%ld must be <= KV_CP_MAX_NODES=%ld\n",
+                  initial, max_nodes);
     return -1;
   }
   cfg->threads = (int)threads;
   cfg->initial_nodes = (int)initial;
-  cfg->min_nodes = (int)min_nodes;
   cfg->max_nodes = (int)max_nodes;
   cfg->replicas = (int)replicas;
   cfg->vnodes = (int)vnodes;
