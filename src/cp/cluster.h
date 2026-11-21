@@ -24,14 +24,15 @@ enum { CLUSTER_MAX_NODES = 1024 };
 typedef struct {
   int id;
   char addr[DRIVER_ADDR_LEN];
-  /** A home replica that serves reads: a read may ask it. */
+  /** The read phase asks it: a home replica that serves reads, or for a write any live one. */
   bool reads;
 } plan_target;
 
 /**
- * Where one request goes. Only the N home replicas of the key count (strict quorum): a read asks
- * read_quorum of those that serve reads; a write, and the write-back of a read, need
- * write_quorum acks of them.
+ * Where one request goes. Only the N home replicas of the key count (strict quorum). The read
+ * phase asks the targets with reads and needs read_quorum answers: R for a read, W for a write,
+ * which reads the clocks of the replicas it writes to. A write, and the write-back of a read, need
+ * write_quorum acks.
  */
 typedef struct {
   size_t count;
@@ -39,7 +40,7 @@ typedef struct {
   plan_target targets[RING_MAX_REPLICAS + 1];
   /** How many of targets are home replicas; the join target comes after. */
   size_t replicas;
-  /** R. */
+  /** Answers the read phase needs: R, or W for a write. */
   size_t read_quorum;
   /** W. */
   size_t write_quorum;
@@ -82,10 +83,8 @@ typedef struct {
 cluster *cluster_new(const cp_config *cfg, cp_store *store, logger log);
 void cluster_free(cluster *c);
 
-/**
- * Plan a write of key: fails (-1) if fewer than W home replicas are live or fewer than R serve
- * reads (a write reads the clocks first). Takes a ticket on success.
- */
+/** Plan a write of key: fails (-1) if fewer than W home replicas are live. Takes a ticket on
+ * success. */
 int cluster_plan_write(cluster *c, const char *key, size_t key_len, plan *out);
 /** Plan a read of key: fails (-1) if fewer than R home replicas serve reads. Takes a ticket on
  * success. */

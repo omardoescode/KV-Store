@@ -98,11 +98,11 @@ static uint64_t next_ts(cluster *c) {
   return v;
 }
 
-static void add_target(plan *p, int id, const cluster_node *n, bool home) {
+static void add_target(plan *p, int id, const cluster_node *n, bool asked) {
   plan_target *t = &p->targets[p->count++];
   t->id = id;
   memcpy(t->addr, n->addr, sizeof(t->addr));
-  t->reads = (bool)(home && node_serves_reads(n->sm.state));
+  t->reads = asked;
 }
 
 static void take_ticket(cluster *c, plan *p) {
@@ -112,31 +112,33 @@ static void take_ticket(cluster *c, plan *p) {
 
 /**
  * Fill out with the live home replicas of key, then the join target while it double-writes, and
- * take a ticket. Returns 0, or -1 (no ticket) if fewer than R serve reads, or with write fewer
- * than W are live. Call with mu held.
+ * take a ticket. A read asks the home replicas that serve reads and needs R; a write asks every
+ * live home replica for its clock and needs W. Returns 0, or -1 (no ticket) if too few can answer.
+ * Call with mu held.
  */
 static int plan_key(cluster *c, const char *key, size_t key_len, bool write, plan *out) {
   out->count = 0;
-  out->read_quorum = (size_t)c->cfg->read_quorum;
   out->write_quorum = (size_t)c->cfg->write_quorum;
+  out->read_quorum = write ? out->write_quorum : (size_t)c->cfg->read_quorum;
   int prefs[RING_MAX_REPLICAS];
   size_t n = c->ring ? ring_prefs(c->ring, key, key_len, prefs) : 0;
-  size_t readers = 0;
+  size_t asked = 0;
   for (size_t i = 0; i != n; i++) {
     const cluster_node *node = &c->nodes[prefs[i]].n;
     if (node_takes_writes(node->sm.state)) {
-      add_target(out, prefs[i], node, true);
-      readers += out->targets[out->count - 1].reads ? 1 : 0;
+      bool ask = (bool)(write || node_serves_reads(node->sm.state));
+      add_target(out, prefs[i], node, ask);
+      asked += ask ? 1 : 0;
     }
   }
   out->replicas = out->count;
   out->coord = out->count ? out->targets[0].id : 0;
-  if (readers < out->read_quorum || (write && out->count < out->write_quorum)) {
+  if (asked < out->read_quorum) {
     out->count = 0;
     return -1;
   }
-  for (size_t i = 0, asked = 0; i != out->count; i++) {
-    if (write || (out->targets[i].reads && asked++ < out->read_quorum)) {
+  for (size_t i = 0; i != out->count; i++) {
+    if (write || out->targets[i].reads) {
       c->nodes[out->targets[i].id].n.requests++;
     }
   }

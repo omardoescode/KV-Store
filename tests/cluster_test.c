@@ -242,10 +242,13 @@ static void test_a_respawned_replica_counts_for_writes_but_serves_no_reads(void)
   kill(f, 1);
   assert(cluster_put_node(f.c, 2, "n2", (node_sm){NODE_REPAIRING, 0, true}, true) == 0);
   plan p;
-  assert(cluster_plan_write(f.c, "k0", 2, &p) == -1);
   assert(cluster_plan_read(f.c, "k0", 2, &p) == -1);
-  assert(cluster_put_node(f.c, 1, "n1", (node_sm){NODE_ACTIVE, 0, true}, true) == 0);
   assert(cluster_plan_write(f.c, "k0", 2, &p) == 0);
+  cluster_done(f.c, p.epoch);
+  assert(p.count == 2 && p.read_quorum == 2 && p.write_quorum == 2);
+  assert(p.targets[0].reads && p.targets[1].reads);
+  assert(cluster_put_node(f.c, 1, "n1", (node_sm){NODE_ACTIVE, 0, true}, true) == 0);
+  assert(cluster_plan_read(f.c, "k0", 2, &p) == 0);
   cluster_done(f.c, p.epoch);
   assert(p.count == 3);
   for (size_t i = 0; i != p.count; i++) {
@@ -253,6 +256,26 @@ static void test_a_respawned_replica_counts_for_writes_but_serves_no_reads(void)
   }
   done(f);
   printf("  test_a_respawned_replica_counts_for_writes_but_serves_no_reads OK\n");
+}
+
+static void test_a_write_reads_the_clocks_of_w_live_replicas_even_when_r_is_larger(void) {
+  static const cp_config cfg_r3 = {
+      .max_nodes = 4,
+      .replicas = 3,
+      .read_quorum = 3,
+      .write_quorum = 2,
+      .vnodes = 128,
+      .probe_fails = 2,
+  };
+  fixture f = three_nodes_with(&cfg_r3);
+  kill(f, 3);
+  plan p;
+  assert(cluster_plan_read(f.c, "k0", 2, &p) == -1);
+  assert(cluster_plan_write(f.c, "k0", 2, &p) == 0);
+  cluster_done(f.c, p.epoch);
+  assert(p.count == 2 && p.read_quorum == 2 && p.write_quorum == 2);
+  done(f);
+  printf("  test_a_write_reads_the_clocks_of_w_live_replicas_even_when_r_is_larger OK\n");
 }
 
 static void test_read_needs_r_replicas_that_serve_reads(void) {
@@ -281,6 +304,7 @@ int main(void) {
   test_write_goes_to_live_home_replicas_and_needs_w_acks();
   test_write_fails_with_fewer_live_home_replicas_than_w();
   test_a_respawned_replica_counts_for_writes_but_serves_no_reads();
+  test_a_write_reads_the_clocks_of_w_live_replicas_even_when_r_is_larger();
   test_read_needs_r_replicas_that_serve_reads();
   printf("all cluster tests passed\n");
   return 0;

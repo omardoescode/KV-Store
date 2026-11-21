@@ -207,6 +207,12 @@ int cp_config_load(cp_config *cfg) {
                   "KV_CP_REPLICAS=%ld, so reads may be stale\n",
                   read_quorum, write_quorum, replicas);
   }
+  if (2 * write_quorum <= replicas) {
+    (void)fprintf(stderr,
+                  "config: warning: 2 * KV_CP_WRITE_QUORUM=%ld <= KV_CP_REPLICAS=%ld, so the "
+                  "clock of a write may not follow the last acked write\n",
+                  write_quorum, replicas);
+  }
   cfg->threads = (int)threads;
   cfg->initial_nodes = (int)initial;
   cfg->max_nodes = (int)max_nodes;

@@ -280,6 +280,21 @@ class FailureTest(ClusterTest):
         finally:
             os.kill(pid, signal.SIGCONT)
 
+    def test_write_needs_only_w_live_replicas_when_r_is_larger(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=3, KV_CP_REPLICAS=3, KV_CP_READ_QUORUM=3,
+                         KV_CP_WRITE_QUORUM=2, KV_CP_FORWARD_TIMEOUT_MS=300,
+                         KV_CP_PROBE_FAILS=100).start(wait_nodes=3)
+        self.assertEqual(c.put('k', 'v1'), 200)
+        pid = c.node_pids()[1]
+        os.kill(pid, signal.SIGSTOP)
+        try:
+            self.assertEqual(c.put('k', 'v2'), 200)
+            self.assertEqual(c.delete('gone'), 404)
+            self.assertEqual(c.get('k'), 503)
+        finally:
+            os.kill(pid, signal.SIGCONT)
+        self.assertEqual(c.get('k'), 'v2')
+
     def test_write_fails_with_two_home_replicas_down_and_no_other_node_takes_it(self):
         c = self.cluster(KV_CP_INITIAL_NODES=4, KV_CP_MAX_NODES=4, KV_CP_REPLICAS=3,
                          KV_CP_READ_QUORUM=2, KV_CP_WRITE_QUORUM=2, KV_CP_FORWARD_TIMEOUT_MS=300,

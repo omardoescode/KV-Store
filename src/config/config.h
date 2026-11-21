@@ -64,7 +64,8 @@ typedef struct {
 /**
  * Fill cfg from the environment like config_load. Also fails if REPLICAS > INITIAL_NODES,
  * INITIAL_NODES > MAX_NODES, or READ_QUORUM or WRITE_QUORUM > REPLICAS. Warns on stderr if
- * READ_QUORUM + WRITE_QUORUM <= REPLICAS: the quorums may not overlap.
+ * READ_QUORUM + WRITE_QUORUM <= REPLICAS (reads may miss the last acked write) or 2 *
+ * WRITE_QUORUM <= REPLICAS (a write reads the clocks of W replicas, which may miss it).
  */
 int cp_config_load(cp_config *cfg);
 

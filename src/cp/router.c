@@ -412,7 +412,8 @@ static void run_op(void *arg) {
     return;
   }
   o->planned = true;
-  // A write reads the clocks of R replicas first, so its clock dominates every acked write.
+  // A write reads the clocks of the replicas it writes to first, so with 2W > N its clock
+  // dominates every acked write.
   read_more(o);
   release(o);
 }
