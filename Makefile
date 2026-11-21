@@ -95,7 +95,8 @@ $(H2O_LIB): $(H2O_DIR)/CMakeLists.txt
 	cmake -S $(H2O_DIR) -B $(H2O_BUILD) -DCMAKE_BUILD_TYPE=Release \
 		-DWITH_MRUBY=OFF -DWITH_DTRACE=OFF -DWITH_BROTLI=OFF -DWITH_ZSTD=OFF \
 		-DWITH_AEGIS=OFF -DWITH_CCACHE=OFF -DWITH_IO_URING=OFF
-	cmake --build $(H2O_BUILD) --target libh2o-evloop --parallel
+	# --parallel sets its own -j; the jobserver of an outer make -j would clash with it.
+	MAKEFLAGS= cmake --build $(H2O_BUILD) --target libh2o-evloop --parallel
 
 $(BUILD_DIR)/http/%.o: CPPFLAGS += $(H2O_CPPFLAGS)
 $(BUILD_DIR)/json/%.o: CPPFLAGS += $(YYJSON_CPPFLAGS)

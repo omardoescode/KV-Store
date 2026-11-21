@@ -25,6 +25,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-format-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} g++ cmake pkg-config libssl-dev zlib1g-dev libsqlite3-dev sqlite3 valgrind
 
+      - name: h2o commit
+        id: h2o
+        run: echo "sha=$(git rev-parse HEAD:third_party/h2o)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        id: h2o-cache
+        with:
+          path: build/h2o
+          key: h2o-${{ runner.os }}-${{ steps.h2o.outputs.sha }}-${{ hashFiles('Makefile') }}
+
+      # The checkout makes h2o's CMakeLists.txt newer than the cached library, so make would build it again.
+      - name: Keep cached h2o
+        if: steps.h2o-cache.outputs.cache-hit == 'true'
+        run: touch build/h2o/libh2o-evloop.a
+
       - name: Format check
         run: make format-check
 
@@ -51,10 +66,26 @@ jobs:
         with:
           submodules: true
 
+      # The runner image usually has these already; apt-get update alone takes about 20 s.
       - name: Install tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ cmake pkg-config libssl-dev zlib1g-dev libsqlite3-dev sqlite3 curl
+          pkgs="g++ cmake pkg-config libssl-dev zlib1g-dev libsqlite3-dev sqlite3 curl"
+          dpkg -s $pkgs >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y $pkgs; }
+
+      - name: h2o commit
+        id: h2o
+        run: echo "sha=$(git rev-parse HEAD:third_party/h2o)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        id: h2o-cache
+        with:
+          path: build/h2o
+          key: h2o-${{ runner.os }}-${{ steps.h2o.outputs.sha }}-${{ hashFiles('Makefile') }}
+
+      # The checkout makes h2o's CMakeLists.txt newer than the cached library, so make would build it again.
+      - name: Keep cached h2o
+        if: steps.h2o-cache.outputs.cache-hit == 'true'
+        run: touch build/h2o/libh2o-evloop.a
 
       - name: Build
         run: make -j"$(nproc)" build/app build/kv-cp-proc
