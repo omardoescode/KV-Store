@@ -51,13 +51,15 @@ On a Docker host:
 
 ```sh
 docker compose up --build
-KV_CP_INITIAL_NODES=1 KV_CP_MAX_NODES=1 docker compose up --build -d
-KV_CP_INITIAL_NODES=2 KV_CP_MAX_NODES=2 docker compose up --build -d
-KV_CP_INITIAL_NODES=3 KV_CP_MAX_NODES=3 docker compose up --build -d
+KV_CP_INITIAL_NODES=1 KV_CP_MAX_NODES=1 KV_CP_REPLICAS=1 docker compose up --build -d
+KV_CP_INITIAL_NODES=2 KV_CP_MAX_NODES=2 KV_CP_REPLICAS=1 docker compose up --build -d
+KV_CP_INITIAL_NODES=3 KV_CP_MAX_NODES=3 KV_CP_REPLICAS=1 docker compose up --build -d
 ```
 
 Run the benchmark against `127.0.0.1:7890` for the live cluster. Incrementally changing
 `KV_CP_INITIAL_NODES` from 1 to 3 is the intended 1–3-node scalability comparison.
+`KV_CP_REPLICAS=1` matches the results table; the default N=3 (R=W=2) needs 3 nodes, as
+N <= `KV_CP_INITIAL_NODES` <= `KV_CP_MAX_NODES`.
 
 ## Results table
 
