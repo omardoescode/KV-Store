@@ -58,8 +58,8 @@ static int move_page(void *arg, const node_row *rows, size_t n) {
     const node_row *r = &rows[i];
     bool moves = false;
     if (m->target != 0) {
-      // Every reader sends: with W < N one replica may miss an acked write, and the target takes
-      // the winner by the fixed rule.
+      // Every reader sends, not one source: with W < N one replica may miss an acked write, so a
+      // single source could leave the target without it. The target keeps the fixed-rule winner.
       moves = (bool)(xfer_source(m->x, r->key, r->key_len, m->target) != 0 &&
                      ring_has(m->x->from, m->node, r->key, r->key_len));
     } else {
