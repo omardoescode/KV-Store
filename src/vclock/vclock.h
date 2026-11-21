@@ -17,7 +17,7 @@ typedef struct {
   int id;
   /** >= 1. */
   uint64_t n;
-  /** Wall-clock ms of the write that set n. */
+  /** The ts of the write that set n (see vstamp). */
   uint64_t ts;
 } vclock_entry;
 
@@ -38,9 +38,10 @@ void vclock_merge(vclock *into, const vclock *other);
 /** Add 1 to the entry of node id and set its ts. */
 void vclock_increment(vclock *c, int id, uint64_t ts);
 
-/** The version of one write: its clock, the wall-clock timestamp and the coordinator id. */
+/** The version of one write: its clock, its timestamp and the coordinator id. */
 typedef struct {
   vclock clock;
+  /** Unix ms << 16 plus a counter, unique and increasing per cp; see cluster_plan_write. */
   uint64_t ts;
   int coord;
 } vstamp;

@@ -150,15 +150,16 @@ int cp_store_migration(cp_store *s, stored_migration *out) {
   return 0;
 }
 
-int cp_store_put_version_mark(cp_store *s, uint64_t mark) {
+int cp_store_put_ts_mark(cp_store *s, uint64_t mark) {
   char v[32];
   (void)snprintf(v, sizeof(v), "%" PRIu64, mark);
-  return put_meta(s, "version_mark", v);
+  return put_meta(s, "ts_mark", v);
 }
 
-int cp_store_version_mark(cp_store *s, uint64_t *out) {
+int cp_store_ts_mark(cp_store *s, uint64_t *out) {
   char v[32];
-  if (get_meta(s, "version_mark", v, sizeof(v)) != 0) {
+  if (get_meta(s, "ts_mark", v, sizeof(v)) != 0 ||
+      (v[0] == '\0' && get_meta(s, "version_mark", v, sizeof(v)) != 0)) {
     return -1;
   }
   *out = strtoull(v, NULL, 10);

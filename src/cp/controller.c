@@ -109,7 +109,7 @@ static void maybe_join(controller *ctl) {
 }
 
 void controller_tick(controller *ctl) {
-  cluster_reserve_versions(ctl->c);
+  cluster_reserve_ts(ctl->c);
   probe_all(ctl);
   heal(ctl);
   static cluster_view v;

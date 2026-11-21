@@ -43,8 +43,8 @@ typedef struct {
   size_t read_quorum;
   /** W. */
   size_t write_quorum;
-  /** Writes: the wall-clock timestamp, unique and increasing, and the coordinator: the first live
-   * home replica, whose clock entry the write increments. */
+  /** Writes: the timestamp (see vstamp) and the coordinator: the first live home replica, whose
+   * clock entry the write increments. */
   uint64_t ts;
   int coord;
   uint64_t epoch;
@@ -78,7 +78,7 @@ typedef struct {
   const ring *prev;
 } cluster_view;
 
-/** Read the version mark from store. Returns NULL on error. */
+/** Read the timestamp mark from store. Returns NULL on error. */
 cluster *cluster_new(const cp_config *cfg, cp_store *store, logger log);
 void cluster_free(cluster *c);
 
@@ -119,8 +119,8 @@ unsigned cluster_spawned(cluster *c, int id, const char *addr);
 /** Return and clear whether a forward to node id failed since the last call. */
 bool cluster_take_forward_error(cluster *c, int id);
 
-/** Move the stored version mark ahead when the versions in use come near it. */
-void cluster_reserve_versions(cluster *c);
+/** Move the stored timestamp mark ahead when the timestamps in use come near it. */
+void cluster_reserve_ts(cluster *c);
 
 /** Set the join phase. IDLE drops the rings of the join. Returns 0 or -1. */
 int cluster_set_phase(cluster *c, mig_phase phase, int target);

@@ -51,7 +51,7 @@ static int send_rows(const move *m, const node_row *rows, size_t n) {
 
 static int move_page(void *arg, const node_row *rows, size_t n) {
   const move *m = arg;
-  cluster_reserve_versions(m->ctl->c);
+  cluster_reserve_ts(m->ctl->c);
   static node_row batch[BATCH_ROWS];
   size_t count = 0;
   for (size_t i = 0; i != n; i++) {
@@ -567,6 +567,6 @@ int controller_start_up(controller *ctl) {
     }
   }
   restart_migration(ctl, mig);
-  cluster_reserve_versions(ctl->c);
+  cluster_reserve_ts(ctl->c);
   return 0;
 }

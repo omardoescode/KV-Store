@@ -5,8 +5,8 @@
 #include <string.h>
 #include <time.h>
 
-// Versions this far ahead of the clock are reserved in the store, in ms.
-enum { VERSION_RESERVE_MS = 60000 };
+// Timestamps this far ahead of the clock are reserved in the store, in ms.
+enum { TS_RESERVE_MS = 60000 };
 
 typedef struct {
   cluster_node n;
@@ -29,8 +29,8 @@ struct cluster {
   bool double_write;
   /** A write to the target failed during COPY: the join must abort. */
   bool double_write_failed;
-  uint64_t last_version;
-  uint64_t version_mark;
+  uint64_t last_ts;
+  uint64_t ts_mark;
   /** Requests take a ticket of the current epoch; a drain waits for older tickets. */
   uint64_t epoch;
   long inflight[2];
@@ -61,13 +61,13 @@ cluster *cluster_new(const cp_config *cfg, cp_store *store, logger log) {
   c->store = store;
   c->log = log;
   c->ring = build_ring(c, 0, 0);
-  if (!c->ring || cp_store_version_mark(store, &c->version_mark) != 0 ||
+  if (!c->ring || cp_store_ts_mark(store, &c->ts_mark) != 0 ||
       pthread_mutex_init(&c->mu, NULL) != 0) {
     ring_free(c->ring);
     free(c);
     return NULL;
   }
-  c->last_version = c->version_mark;
+  c->last_ts = c->ts_mark;
   return c;
 }
 
@@ -82,19 +82,19 @@ void cluster_free(cluster *c) {
   free(c);
 }
 
-static uint64_t next_version(cluster *c) {
+static uint64_t next_ts(cluster *c) {
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   uint64_t ms = ((uint64_t)ts.tv_sec * 1000) + ((uint64_t)ts.tv_nsec / 1000000);
   uint64_t v = ms << 16U;
-  if (v <= c->last_version) {
-    v = c->last_version + 1;
+  if (v <= c->last_ts) {
+    v = c->last_ts + 1;
   }
-  // Above the stored mark, a restart could hand out this version again.
-  if (v >= c->version_mark) {
+  // Above the stored mark, a restart could hand out this timestamp again.
+  if (v >= c->ts_mark) {
     return 0;
   }
-  c->last_version = v;
+  c->last_ts = v;
   return v;
 }
 
@@ -149,7 +149,7 @@ static int plan_key(cluster *c, const char *key, size_t key_len, bool write, pla
 
 int cluster_plan_write(cluster *c, const char *key, size_t key_len, plan *out) {
   pthread_mutex_lock(&c->mu);
-  out->ts = next_version(c);
+  out->ts = next_ts(c);
   int rc = out->ts ? plan_key(c, key, key_len, true, out) : -1;
   pthread_mutex_unlock(&c->mu);
   return rc;
@@ -315,25 +315,25 @@ bool cluster_take_forward_error(cluster *c, int id) {
   return failed;
 }
 
-void cluster_reserve_versions(cluster *c) {
+void cluster_reserve_ts(cluster *c) {
   struct timespec ts;
   clock_gettime(CLOCK_REALTIME, &ts);
   uint64_t now = ((uint64_t)ts.tv_sec * 1000) + ((uint64_t)ts.tv_nsec / 1000000);
   pthread_mutex_lock(&c->mu);
-  uint64_t mark = c->version_mark;
-  uint64_t last = c->last_version;
+  uint64_t mark = c->ts_mark;
+  uint64_t last = c->last_ts;
   pthread_mutex_unlock(&c->mu);
-  uint64_t want = (now + (VERSION_RESERVE_MS / 2)) << 16U;
+  uint64_t want = (now + (TS_RESERVE_MS / 2)) << 16U;
   if (mark > want && mark > last + (1ULL << 30U)) {
     return;
   }
-  uint64_t next = (now + VERSION_RESERVE_MS) << 16U;
+  uint64_t next = (now + TS_RESERVE_MS) << 16U;
   if (next <= last) {
     next = last + (1ULL << 32U);
   }
-  if (cp_store_put_version_mark(c->store, next) == 0) {
+  if (cp_store_put_ts_mark(c->store, next) == 0) {
     pthread_mutex_lock(&c->mu);
-    c->version_mark = next;
+    c->ts_mark = next;
     pthread_mutex_unlock(&c->mu);
   }
 }

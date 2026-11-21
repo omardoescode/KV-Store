@@ -8,7 +8,7 @@
 #include "cp/driver.h"
 #include "cp/sm.h"
 
-/** cp state in SQLite: nodes, the migration record and the version mark. Controller thread. */
+/** cp state in SQLite: nodes, the migration record and the timestamp mark. Controller thread. */
 typedef struct cp_store cp_store;
 
 typedef struct {
@@ -39,8 +39,8 @@ int cp_store_put_migration(cp_store *s, stored_migration m);
 /** Read the migration record; IDLE with target 0 if none. Returns 0 or -1. */
 int cp_store_migration(cp_store *s, stored_migration *out);
 
-int cp_store_put_version_mark(cp_store *s, uint64_t mark);
-/** Read the version mark, 0 if none. Returns 0 or -1. */
-int cp_store_version_mark(cp_store *s, uint64_t *out);
+int cp_store_put_ts_mark(cp_store *s, uint64_t mark);
+/** Read the timestamp mark (or the version mark of an older cp.db), 0 if none. Returns 0 or -1. */
+int cp_store_ts_mark(cp_store *s, uint64_t *out);
 
 #endif

@@ -1,9 +1,11 @@
 #include "cp/cluster.h"
 
 #include <assert.h>
+#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 // Owners with vnodes 128 and 1 replica: {1,2,3} -> {1,2,3,4} moves k2 from 1 and k7 from 2 to
 // node 4; k0 stays on 2. With 2 replicas k0 is on 2 and 3; with 3 replicas every key is on all.
@@ -47,7 +49,7 @@ static fixture three_nodes_with(const cp_config *config) {
     (void)snprintf(addr, sizeof(addr), "n%d", id);
     assert(cluster_put_node(f.c, id, addr, (node_sm){NODE_ACTIVE, 0, false}, true) == 0);
   }
-  cluster_reserve_versions(f.c);
+  cluster_reserve_ts(f.c);
   return f;
 }
 
@@ -143,7 +145,7 @@ static void test_add_request_stops_at_max_nodes(void) {
   printf("  test_add_request_stops_at_max_nodes OK\n");
 }
 
-static uint64_t write_version(cluster *c, const char *key) {
+static uint64_t write_ts(cluster *c, const char *key) {
   plan p;
   if (cluster_plan_write(c, key, strlen(key), &p) != 0) {
     return 0;
@@ -152,23 +154,47 @@ static uint64_t write_version(cluster *c, const char *key) {
   return p.ts;
 }
 
-static void test_versions_after_restart_are_above_the_stored_mark(void) {
+static void test_timestamps_after_restart_are_above_the_stored_mark(void) {
   fixture f = three_nodes();
-  uint64_t before = write_version(f.c, "k0");
+  uint64_t before = write_ts(f.c, "k0");
   assert(before != 0);
   uint64_t mark = 0;
-  assert(cp_store_version_mark(f.store, &mark) == 0);
+  assert(cp_store_ts_mark(f.store, &mark) == 0);
   assert(mark > before);
   cluster_free(f.c);
   f.c = cluster_new(&cfg, f.store, (logger){quiet, NULL});
   assert(f.c);
   assert(cluster_put_node(f.c, 2, "n2", (node_sm){NODE_ACTIVE, 0, false}, true) == 0);
-  // Nothing is reserved above the mark yet: the version would pass it, so the write is refused.
-  assert(write_version(f.c, "k0") == 0);
-  cluster_reserve_versions(f.c);
-  assert(write_version(f.c, "k0") > mark);
+  // Nothing is reserved above the mark yet: the timestamp would pass it, so the write is refused.
+  assert(write_ts(f.c, "k0") == 0);
+  cluster_reserve_ts(f.c);
+  assert(write_ts(f.c, "k0") > mark);
   done(f);
-  printf("  test_versions_after_restart_are_above_the_stored_mark OK\n");
+  printf("  test_timestamps_after_restart_are_above_the_stored_mark OK\n");
+}
+
+static void test_an_older_cp_db_gives_its_version_mark_as_the_ts_mark(void) {
+  char path[] = "/tmp/kv-cluster-test-XXXXXX";
+  int fd = mkstemp(path);
+  assert(fd >= 0);
+  (void)close(fd);
+  cp_store *store = cp_store_open(path);
+  assert(store);
+  cp_store_close(store);
+  sqlite3 *db = NULL;
+  assert(sqlite3_open(path, &db) == SQLITE_OK);
+  assert(sqlite3_exec(db, "INSERT INTO meta(key, value) VALUES('version_mark', '123456789')", NULL,
+                      NULL, NULL) == SQLITE_OK);
+  sqlite3_close(db);
+  store = cp_store_open(path);
+  assert(store);
+  uint64_t mark = 0;
+  assert(cp_store_ts_mark(store, &mark) == 0 && mark == 123456789);
+  assert(cp_store_put_ts_mark(store, 987654321) == 0);
+  assert(cp_store_ts_mark(store, &mark) == 0 && mark == 987654321);
+  cp_store_close(store);
+  (void)unlink(path);
+  printf("  test_an_older_cp_db_gives_its_version_mark_as_the_ts_mark OK\n");
 }
 
 /** The preference list of k0 with nodes 1, 2 and 3 and 3 replicas: every node, in ring order. */
@@ -249,7 +275,9 @@ int main(void) {
   test_flip_moves_reads_to_new_ring();
   test_abort_restores_old_plans();
   test_add_request_stops_at_max_nodes();
-  test_versions_after_restart_are_above_the_stored_mark();
+  test_timestamps_after_restart_are_above_the_stored_mark();
+  test_an_older_cp_db_gives_its_version_mark_as_the_ts_mark();
+  test_an_older_cp_db_gives_its_version_mark_as_the_ts_mark();
   test_write_goes_to_live_home_replicas_and_needs_w_acks();
   test_write_fails_with_fewer_live_home_replicas_than_w();
   test_a_respawned_replica_counts_for_writes_but_serves_no_reads();
