@@ -9,9 +9,11 @@ const P99_MS = Number(__ENV.P99_MS || 50);
 const MODE = __ENV.MODE || 'ramp';
 const PRELOAD = (__ENV.PRELOAD || '1') !== '0';
 
-// step: one constant-arrival-rate run at RATE. ramp: START_RATE to MAX_RATE in STAGES steps,
+// step: one constant-arrival-rate run at RATE. closed: VUS virtual users, each sends its next
+// request when the last one returns, for DURATION. ramp: START_RATE to MAX_RATE in STAGES steps,
 // each ramped over RAMP and held for HOLD, aborted by the thresholds at saturation.
 const RATE = Number(__ENV.RATE || 1000);
+const VUS = Number(__ENV.VUS || 8);
 const DURATION = __ENV.DURATION || '20s';
 const START_RATE = Number(__ENV.START_RATE || 1000);
 const MAX_RATE = Number(__ENV.MAX_RATE || 100000);
@@ -30,10 +32,12 @@ for (let i = 1; i <= STAGES; i++) {
   stages.push({ target, duration: RAMP }, { target, duration: HOLD });
 }
 
-const scenario =
-  MODE === 'step'
-    ? { executor: 'constant-arrival-rate', rate: RATE, duration: DURATION }
-    : { executor: 'ramping-arrival-rate', startRate: START_RATE, stages };
+const arrival = { timeUnit: '1s', preAllocatedVUs: PRE_VUS, maxVUs: MAX_VUS };
+const scenarios = {
+  step: { executor: 'constant-arrival-rate', rate: RATE, duration: DURATION, ...arrival },
+  closed: { executor: 'constant-vus', vus: VUS, duration: DURATION },
+  ramp: { executor: 'ramping-arrival-rate', startRate: START_RATE, stages, ...arrival },
+};
 
 const abort = (threshold) => ({ threshold, abortOnFail: true, delayAbortEval: '5s' });
 
@@ -42,7 +46,7 @@ export const options = {
   summaryTrendStats: ['avg', 'min', 'med', 'p(95)', 'p(99)', 'max'],
   setupTimeout: '120s',
   scenarios: {
-    main: { ...scenario, timeUnit: '1s', preAllocatedVUs: PRE_VUS, maxVUs: MAX_VUS },
+    main: scenarios[MODE],
   },
   thresholds: {
     'http_req_failed{phase:main}': [abort('rate<0.01')],
