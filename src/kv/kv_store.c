@@ -695,15 +695,25 @@ static int store_entry(kv_store *store, const char *key, const vstamp *stamp, in
   return 0;
 }
 
+typedef enum {
+  /** max_pending changes wait; the map is unchanged. */
+  APPLY_FULL = -2,
+  APPLY_ERROR = -1,
+  /** The change won; no live value was there. */
+  APPLY_NEW = 0,
+  /** The change won over a live value. */
+  APPLY_REPLACED = 1,
+  /** The stored entry won. */
+  APPLY_LOST = 2,
+} apply_result;
+
 /**
  * Apply a put (deleted 0) or tombstone with stamp (NULL: empty) to the map by the winner rule and
  * queue the entry. Map and queue change under one lock so the queue holds changes in map order,
- * and the database ends with the entry the map holds. Returns 1 if the change won and a live value
- * was there before, 0 if it won and none was, 2 if the stored entry won, -1 on error, -2 if
- * max_pending changes wait (the map is unchanged).
+ * and the database ends with the entry the map holds.
  */
-static int apply(kv_store *store, const char *key, const void *value, size_t value_len,
-                 const vstamp *stamp, int64_t deleted) {
+static apply_result apply(kv_store *store, const char *key, const void *value, size_t value_len,
+                          const vstamp *stamp, int64_t deleted) {
   static const vstamp none = {0};
   stamp = stamp ? stamp : &none;
   vstamp old;
@@ -712,23 +722,23 @@ static int apply(kv_store *store, const char *key, const void *value, size_t val
   void *old_value = NULL;
   size_t old_len = 0;
   pthread_mutex_lock(&store->mu);
-  int status = -2;
+  apply_result status = APPLY_FULL;
   if (store->queued + store->in_batch < store->max_pending) {
     int found = map_get(store->map, key, &old, &old_deleted, &old_value, &old_len);
     int pick = found == 1 ? vstamp_pick(stamp, &old, &winner) : 0;
     if (found < 0) {
-      status = -1;
+      status = APPLY_ERROR;
     } else if (pick == 0) {
-      status = found && !old_deleted ? 1 : 0;
+      status = found && !old_deleted ? APPLY_REPLACED : APPLY_NEW;
       if (store_entry(store, key, found == 1 ? &winner : stamp, deleted, value, value_len) != 0) {
-        status = -1;
+        status = APPLY_ERROR;
       }
     } else {
-      status = 2;
+      status = APPLY_LOST;
       // A concurrent change lost, but the stored clock takes in its clock.
       if (vclock_compare(&winner.clock, &old.clock) != VCLOCK_EQUAL &&
           store_entry(store, key, &winner, old_deleted, old_value, old_len) != 0) {
-        status = -1;
+        status = APPLY_ERROR;
       }
     }
   }
@@ -739,13 +749,13 @@ static int apply(kv_store *store, const char *key, const void *value, size_t val
 
 int kv_store_put(kv_store *store, const char *key, const void *value, size_t value_len,
                  const vstamp *stamp) {
-  int rc = apply(store, key, value, value_len, stamp, 0);
-  return rc >= 0 ? 0 : rc;
+  apply_result rc = apply(store, key, value, value_len, stamp, 0);
+  return rc == APPLY_FULL || rc == APPLY_ERROR ? rc : 0;
 }
 
 int kv_store_del(kv_store *store, const char *key, const vstamp *stamp) {
-  int rc = apply(store, key, NULL, 0, stamp, now_ms());
-  return rc == 2 ? 1 : rc;
+  apply_result rc = apply(store, key, NULL, 0, stamp, now_ms());
+  return rc == APPLY_LOST ? APPLY_REPLACED : rc;
 }
 
 int kv_store_remove(kv_store *store, const char *key) {
