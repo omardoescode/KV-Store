@@ -125,22 +125,25 @@ size_t vclock_encode(const vclock *c, char out[VCLOCK_TEXT_MAX]) {
   return len;
 }
 
-/**
- * Parse the decimal digits at *p, before end, into *out and move *p past them. Returns 0, or -1 if
- * there are none or they overflow.
- */
-static int parse_u64(const char **p, const char *end, uint64_t *out) {
+size_t vclock_parse_u64(const char *text, size_t len, uint64_t *out) {
   uint64_t v = 0;
-  const char *start = *p;
-  for (; *p != end && **p >= '0' && **p <= '9'; (*p)++) {
-    unsigned digit = (unsigned)(**p - '0');
+  size_t i = 0;
+  for (; i != len && text[i] >= '0' && text[i] <= '9'; i++) {
+    unsigned digit = (unsigned)(text[i] - '0');
     if (v > (UINT64_MAX - digit) / 10) {
-      return -1;
+      return 0;
     }
     v = (v * 10) + digit;
   }
   *out = v;
-  return *p == start ? -1 : 0;
+  return i;
+}
+
+/** Parse the decimal at *p, before end, into *out and move *p past it. Returns 0 or -1. */
+static int parse_u64(const char **p, const char *end, uint64_t *out) {
+  size_t n = vclock_parse_u64(*p, (size_t)(end - *p), out);
+  *p += n;
+  return n ? 0 : -1;
 }
 
 /** Parse "id:n:ts" at *p into *e and move *p past it. Returns 0 or -1. */

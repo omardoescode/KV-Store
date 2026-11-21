@@ -69,4 +69,10 @@ size_t vclock_encode(const vclock *c, char out[VCLOCK_TEXT_MAX]);
  */
 int vclock_decode(const char *text, size_t len, vclock *out);
 
+/**
+ * Parse the decimal digits at the start of len bytes of text into *out. Returns their count, or 0
+ * if there are none or they overflow.
+ */
+size_t vclock_parse_u64(const char *text, size_t len, uint64_t *out);
+
 #endif

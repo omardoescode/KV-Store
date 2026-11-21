@@ -179,6 +179,17 @@ static void test_a_full_clock_with_the_largest_counters_fits_the_text_buffer(voi
   printf("  test_a_full_clock_with_the_largest_counters_fits_the_text_buffer OK\n");
 }
 
+static void test_parse_u64_reads_the_leading_digits(void) {
+  uint64_t v = 7;
+  assert(vclock_parse_u64("123abc", 6, &v) == 3 && v == 123);
+  assert(vclock_parse_u64("12", 1, &v) == 1 && v == 1);
+  assert(vclock_parse_u64("18446744073709551615", 20, &v) == 20 && v == UINT64_MAX);
+  assert(vclock_parse_u64("18446744073709551616", 20, &v) == 0);
+  assert(vclock_parse_u64("x1", 2, &v) == 0);
+  assert(vclock_parse_u64("", 0, &v) == 0);
+  printf("  test_parse_u64_reads_the_leading_digits OK\n");
+}
+
 static void test_decode_refuses_malformed_text(void) {
   static const char *const bad[] = {
       "1",
@@ -221,6 +232,7 @@ int main(void) {
   test_a_full_tie_picks_the_same_stamp_in_either_order();
   test_encode_writes_entries_in_id_order();
   test_a_full_clock_with_the_largest_counters_fits_the_text_buffer();
+  test_parse_u64_reads_the_leading_digits();
   test_decode_refuses_malformed_text();
   printf("all vclock tests passed\n");
   return 0;

@@ -71,16 +71,11 @@ static char *key_copy(http_response *response, const http_request *request, size
  */
 static int header_uint(const http_request *request, http_str name, uint64_t max, uint64_t *out) {
   http_str h = http_req_header(request, name);
-  uint64_t v = 0;
-  for (size_t i = 0; i != h.len; i++) {
-    unsigned digit = (unsigned)(unsigned char)h.ptr[i] - '0';
-    if (digit > 9 || v > (max - digit) / 10) {
-      return -1;
-    }
-    v = (v * 10) + digit;
+  *out = 0;
+  if (!h.ptr) {
+    return 0;
   }
-  *out = v;
-  return h.ptr != NULL && h.len == 0 ? -1 : 0;
+  return h.len != 0 && vclock_parse_u64(h.ptr, h.len, out) == h.len && *out <= max ? 0 : -1;
 }
 
 /**
@@ -380,13 +375,9 @@ static void dump_handler(http_response *response, const http_request *request, v
   kv_store *store = arg;
   http_str cursor = http_req_query(request, HTTP_STR("cursor"));
   http_str limit_str = http_req_query(request, HTTP_STR("limit"));
-  size_t limit = 1000;
-  if (limit_str.ptr) {
+  uint64_t limit = 1000;
+  if (limit_str.ptr && vclock_parse_u64(limit_str.ptr, limit_str.len, &limit) != limit_str.len) {
     limit = 0;
-    for (size_t i = 0; i != limit_str.len && limit <= 100000; i++) {
-      unsigned digit = (unsigned)(unsigned char)limit_str.ptr[i] - '0';
-      limit = digit > 9 ? SIZE_MAX : (limit * 10) + digit;
-    }
   }
   if (limit < 1 || limit > 100000) {
     write_message(response, 400, "limit must be in [1, 100000]\n");
@@ -447,15 +438,7 @@ static void digest_handler(http_response *response, const http_request *request,
 /** Set *out from query parameter name, a decimal uint64. Returns false if absent or malformed. */
 static bool query_u64(const http_request *request, http_str name, uint64_t *out) {
   http_str v = http_req_query(request, name);
-  *out = 0;
-  for (size_t i = 0; i != v.len; i++) {
-    unsigned digit = (unsigned)(unsigned char)v.ptr[i] - '0';
-    if (digit > 9 || *out > (UINT64_MAX - digit) / 10) {
-      return false;
-    }
-    *out = (*out * 10) + digit;
-  }
-  return v.len != 0;
+  return (bool)(v.len != 0 && vclock_parse_u64(v.ptr, v.len, out) == v.len);
 }
 
 /**
