@@ -47,11 +47,15 @@ typedef struct {
 } vstamp;
 
 /**
- * The fixed winner rule. A clock that dominates wins; else (equal or concurrent clocks) the higher
- * ts wins, then the higher coord, then a. Sets *out to the winner with the merge of both clocks.
- * Returns 0 if a wins, 1 if b wins.
+ * The fixed winner rule, the same on nodes and cp. A clock that dominates wins; else (equal or
+ * concurrent clocks) the higher ts wins, then the higher coord, then a fixed order of the clocks,
+ * so either order of a and b picks the same stamp; of two same stamps, a. Sets *out to the winner
+ * with the merge of both clocks. Returns 0 if a wins, 1 if b wins.
  */
 int vstamp_pick(const vstamp *a, const vstamp *b, vstamp *out);
+
+/** Whether a and b have the same ts, coord and an equal clock. */
+bool vstamp_same(const vstamp *a, const vstamp *b);
 
 /** Room for the text of any clock, with its NUL: "id:n:ts," is at most 10 + 1 + 20 + 1 + 20 + 1. */
 enum { VCLOCK_TEXT_MAX = (VCLOCK_MAX * 53) + 1 };

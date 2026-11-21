@@ -193,11 +193,6 @@ static void respond_winner(op *o) {
   json_builder_free(b);
 }
 
-static bool same_stamp(const vstamp *a, const vstamp *b) {
-  return (bool)(a->ts == b->ts && a->coord == b->coord &&
-                vclock_compare(&a->clock, &b->clock) == VCLOCK_EQUAL);
-}
-
 typedef struct {
   op *o;
   size_t index;
@@ -296,7 +291,7 @@ static void read_done(op *o) {
   bool fresh[RING_MAX_REPLICAS + 1] = {false};
   size_t n_fresh = 0;
   for (size_t i = 0; o->found && i != o->p.replicas; i++) {
-    fresh[i] = (bool)(o->answered[i] && !o->missing[i] && same_stamp(&o->stamps[i], &o->win));
+    fresh[i] = (bool)(o->answered[i] && !o->missing[i] && vstamp_same(&o->stamps[i], &o->win));
     n_fresh += fresh[i] ? 1 : 0;
   }
   if (!o->found || n_fresh == o->answers) {

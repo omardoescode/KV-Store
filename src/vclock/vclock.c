@@ -79,17 +79,39 @@ void vclock_increment(vclock *c, int id, uint64_t ts) {
   vclock_merge(c, &one);
 }
 
+/** Return whether b comes after a in a total order of clocks: entry by entry, id, then n, then ts.
+ */
+static bool clock_after(const vclock *a, const vclock *b) {
+  for (size_t i = 0; i != a->len && i != b->len; i++) {
+    const vclock_entry *x = &a->e[i];
+    const vclock_entry *y = &b->e[i];
+    if (x->id != y->id) {
+      return y->id < x->id;
+    }
+    if (x->n != y->n || x->ts != y->ts) {
+      return (bool)(y->n > x->n || (y->n == x->n && y->ts > x->ts));
+    }
+  }
+  return b->len > a->len;
+}
+
 int vstamp_pick(const vstamp *a, const vstamp *b, vstamp *out) {
   vclock_order order = vclock_compare(&a->clock, &b->clock);
   bool b_wins = order == VCLOCK_BEFORE;
   if (order == VCLOCK_EQUAL || order == VCLOCK_CONCURRENT) {
-    b_wins = (bool)(b->ts > a->ts || (b->ts == a->ts && b->coord > a->coord));
+    b_wins = (bool)(b->ts > a->ts || (b->ts == a->ts && b->coord > a->coord) ||
+                    (b->ts == a->ts && b->coord == a->coord && clock_after(&a->clock, &b->clock)));
   }
   vclock merged = a->clock;
   vclock_merge(&merged, &b->clock);
   *out = b_wins ? *b : *a;
   out->clock = merged;
   return b_wins ? 1 : 0;
+}
+
+bool vstamp_same(const vstamp *a, const vstamp *b) {
+  return (bool)(a->ts == b->ts && a->coord == b->coord &&
+                vclock_compare(&a->clock, &b->clock) == VCLOCK_EQUAL);
 }
 
 size_t vclock_encode(const vclock *c, char out[VCLOCK_TEXT_MAX]) {

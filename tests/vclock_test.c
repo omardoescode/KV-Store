@@ -138,6 +138,21 @@ static void test_equal_clocks_pick_by_timestamp_then_the_first(void) {
   printf("  test_equal_clocks_pick_by_timestamp_then_the_first OK\n");
 }
 
+static void test_a_full_tie_picks_the_same_stamp_in_either_order(void) {
+  vstamp a = stamp("1:1:7", 500, 3);
+  vstamp b = stamp("2:1:7", 500, 3);
+  vstamp out;
+  assert(vstamp_pick(&a, &b, &out) == 0);
+  assert(same(&out.clock, "1:1:7,2:1:7") && out.ts == 500 && out.coord == 3);
+  assert(vstamp_pick(&b, &a, &out) == 1);
+  assert(same(&out.clock, "1:1:7,2:1:7"));
+  vstamp low = stamp("1:1:7,2:2:7", 500, 3);
+  vstamp high = stamp("1:2:7,2:1:7", 500, 3);
+  assert(vstamp_pick(&low, &high, &out) == 1);
+  assert(vstamp_pick(&high, &low, &out) == 0);
+  printf("  test_a_full_tie_picks_the_same_stamp_in_either_order OK\n");
+}
+
 static void test_encode_writes_entries_in_id_order(void) {
   vclock c = clock_of("");
   char text[VCLOCK_TEXT_MAX];
@@ -203,6 +218,7 @@ int main(void) {
   test_concurrent_clocks_pick_the_later_timestamp_with_the_merged_clock();
   test_concurrent_clocks_with_one_timestamp_pick_the_higher_coordinator();
   test_equal_clocks_pick_by_timestamp_then_the_first();
+  test_a_full_tie_picks_the_same_stamp_in_either_order();
   test_encode_writes_entries_in_id_order();
   test_a_full_clock_with_the_largest_counters_fits_the_text_buffer();
   test_decode_refuses_malformed_text();

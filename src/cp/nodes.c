@@ -165,11 +165,6 @@ static int by_key(const void *lhs, const void *rhs) {
   return (a->key_len > b->key_len) - (a->key_len < b->key_len);
 }
 
-static bool same_stamp(const vstamp *a, const vstamp *b) {
-  return (bool)(a->ts == b->ts && a->coord == b->coord &&
-                vclock_compare(&a->clock, &b->clock) == VCLOCK_EQUAL);
-}
-
 /** The replicas of one segment and the rows to send each. */
 typedef struct {
   const cluster_view *v;
@@ -206,7 +201,7 @@ static int send_winner(ae_out *out, const ae_row *rows, size_t n) {
   bool fresh[RING_MAX_REPLICAS] = {false};
   for (size_t k = 0; k != n; k++) {
     has[rows[k].src] = true;
-    fresh[rows[k].src] = same_stamp(&rows[k].stamp, &merged);
+    fresh[rows[k].src] = vstamp_same(&rows[k].stamp, &merged);
   }
   const ae_row *w = &rows[win];
   node_row row = {w->key, w->key_len, w->value, w->value_len, merged, w->deleted};

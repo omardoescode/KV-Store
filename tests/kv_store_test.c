@@ -137,6 +137,21 @@ static void test_concurrent_puts_keep_the_winner_with_the_merged_clock(const cha
   printf("  test_concurrent_puts_keep_the_winner_with_the_merged_clock OK\n");
 }
 
+static void test_a_full_tie_keeps_the_same_value_in_either_order(const char *db) {
+  kv_store *store = open_store(db, 10, 1000000);
+  assert(store);
+  vstamp a = stamp("1:1:7", 500, 3);
+  vstamp b = stamp("2:1:7", 500, 3);
+  assert(kv_store_put(store, "ab", "a", 1, &a) == 0);
+  assert(kv_store_put(store, "ab", "b", 1, &b) == 0);
+  assert(kv_store_put(store, "ba", "b", 1, &b) == 0);
+  assert(kv_store_put(store, "ba", "a", 1, &a) == 0);
+  expect_record(store, "ab", "a", "1:1:7,2:1:7", 500, 3);
+  expect_record(store, "ba", "a", "1:1:7,2:1:7", 500, 3);
+  assert(kv_store_free(store) == 0);
+  printf("  test_a_full_tie_keeps_the_same_value_in_either_order OK\n");
+}
+
 static void test_tombstone_carries_its_clock(const char *db) {
   kv_store *store = open_store(db, 10, 1000000);
   assert(store);
@@ -338,6 +353,7 @@ int main(void) {
   (void)snprintf(bad_db, sizeof(bad_db), "%s/bad.db", dir);
   test_failing_change_does_not_block_others(bad_db);
   test_concurrent_puts_keep_the_winner_with_the_merged_clock(db);
+  test_a_full_tie_keeps_the_same_value_in_either_order(db);
   test_tombstone_carries_its_clock(db);
   char old_db[sizeof(dir) + 16];
   (void)snprintf(old_db, sizeof(old_db), "%s/old.db", dir);
