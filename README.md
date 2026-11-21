@@ -29,7 +29,8 @@ Requires `gcc`, a C++ compiler, `make`, `cmake`, `pkg-config`, `clang-format`, `
 |---|---|
 | `make` | Build `build/app` and `build/compile_commands.json` |
 | `make run` | Build and run with `./.env` |
-| `make test` | Unit tests + HTTP and shutdown tests (ports 7891, 7892) |
+| `make test` | Unit tests |
+| `make test-e2e` | HTTP, node, shutdown tests (ports 7891-7893) + cp tests in parallel (ports 10000+); `E2E_JOBS=N`, `E2E_SHARD=K/N` |
 | `make memcheck` | HTTP tests under valgrind (port 7890) |
 | `make bench` | Load test and profile, see [bench/README.md](bench/README.md) |
 | `make format` / `format-check` | Format / check format |

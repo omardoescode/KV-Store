@@ -48,7 +48,7 @@ DEP := $(SRC:src/%.c=$(BUILD_DIR)/%.d)
 
 FMT_FILES := $(SRC) $(wildcard src/*.h src/*/*.h tests/*.c)
 
-.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-vclock test-ring test-sm test-cluster test-resolve test-controller test-cp test-shutdown memcheck bench bench-cluster format format-check lint lint-fix init
+.PHONY: all clean distclean run test test-hashmap test-router test-log test-config test-kv-store test-vclock test-ring test-sm test-cluster test-resolve test-controller test-cp test-e2e test-shutdown memcheck bench bench-cluster format format-check lint lint-fix init
 
 all: $(COMPDB) $(TARGET) $(if $(wildcard src/cp/main.c),$(CP_TARGET) $(CP_PROC_TARGET))
 
@@ -234,15 +234,17 @@ TEST_BINS := $(VCLOCK_TEST_BIN) $(HM_TEST_BIN) $(RING_TEST_BIN) $(SM_TEST_BIN) $
 test-cp: $(TARGET) $(CP_PROC_TARGET)
 	python3 tests/cp_test.py
 
+E2E_JOBS ?=
+E2E_SHARD ?= 1/1
+
+test-e2e: $(TARGET) $(CP_PROC_TARGET)
+	python3 tests/e2e.py $(if $(E2E_JOBS),-j $(E2E_JOBS)) --shard $(E2E_SHARD)
+
 test-shutdown: $(TARGET)
 	tests/shutdown_test.sh
 
-test: $(TEST_BINS) $(TARGET) $(CP_PROC_TARGET)
+test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do ./$$t; done
-	tests/http_test.sh
-	tests/node_test.sh
-	tests/shutdown_test.sh
-	python3 tests/cp_test.py
 
 memcheck: $(TARGET) $(CP_PROC_TARGET)
 	tests/memcheck.sh
