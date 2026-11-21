@@ -811,31 +811,8 @@ static int digest_entry(const char *key, size_t key_len, const void *val, size_t
   if (decode_entry(val, val_len, &stamp, &deleted, &at) != 0) {
     return -1;
   }
-  uint64_t pos = key_position(key, key_len);
-  size_t lo = 0;
-  size_t hi = d->n;
-  while (lo < hi) {
-    size_t mid = lo + ((hi - lo) / 2);
-    if (d->ends[mid] < pos) {
-      lo = mid + 1;
-    } else {
-      hi = mid;
-    }
-  }
-  char clock[VCLOCK_TEXT_MAX];
-  (void)vclock_encode(&stamp.clock, clock);
-  char tail[VCLOCK_TEXT_MAX + 64];
-  int tail_len = snprintf(tail, sizeof(tail), "\n%s\n%" PRIu64 "\n%d\n%d", clock, stamp.ts,
-                          stamp.coord, deleted != 0);
-  size_t len = key_len + (size_t)tail_len;
-  char *buf = malloc(len);
-  if (!buf) {
-    return -1;
-  }
-  memcpy(buf, key, key_len);
-  memcpy(buf + key_len, tail, (size_t)tail_len);
-  d->hashes[lo == d->n ? 0 : lo] ^= key_position(buf, len);
-  free(buf);
+  d->hashes[key_segment(key_position(key, key_len), d->ends, d->n)] ^=
+      key_entry_hash(key, key_len, &stamp, deleted != 0);
   return 0;
 }
 

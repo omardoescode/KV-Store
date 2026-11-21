@@ -131,17 +131,9 @@ int node_digest(const char *addr, const uint64_t *ends, size_t n, uint64_t *hash
   memset(hashes, 0, n * sizeof(*hashes));
   for (size_t i = 0; i != node->n; i++) {
     const fake_row *r = &node->rows[i];
-    uint64_t pos = key_position(r->key, strlen(r->key));
-    size_t seg = 0;
-    while (seg != n && ends[seg] < pos) {
-      seg++;
-    }
-    char clock[VCLOCK_TEXT_MAX];
-    (void)vclock_encode(&r->stamp.clock, clock);
-    char text[VCLOCK_TEXT_MAX + 128];
-    int len = snprintf(text, sizeof(text), "%s %s %" PRIu64 " %d %d", r->key, clock, r->stamp.ts,
-                       r->stamp.coord, r->deleted);
-    hashes[seg == n ? 0 : seg] ^= key_position(text, (size_t)len);
+    size_t len = strlen(r->key);
+    hashes[key_segment(key_position(r->key, len), ends, n)] ^=
+        key_entry_hash(r->key, len, &r->stamp, r->deleted);
   }
   return 0;
 }

@@ -176,7 +176,7 @@ $(VCLOCK_TEST_BIN): $(VCLOCK_TEST_SRC) src/vclock/vclock.h
 test-vclock: $(VCLOCK_TEST_BIN)
 	./$(VCLOCK_TEST_BIN)
 
-RING_TEST_SRC := src/cp/ring.c src/keypos/keypos.c tests/ring_test.c
+RING_TEST_SRC := src/cp/ring.c src/keypos/keypos.c src/vclock/vclock.c tests/ring_test.c
 RING_TEST_BIN := $(BUILD_DIR)/ring_test
 
 $(RING_TEST_BIN): $(RING_TEST_SRC) src/cp/ring.h $(SIPHASH_OBJ)
@@ -196,8 +196,8 @@ $(SM_TEST_BIN): $(SM_TEST_SRC) src/cp/sm.h
 test-sm: $(SM_TEST_BIN)
 	./$(SM_TEST_BIN)
 
-CLUSTER_TEST_SRC := src/cp/cluster.c src/cp/ring.c src/keypos/keypos.c src/cp/sm.c src/cp/store.c \
-                    tests/cluster_test.c
+CLUSTER_TEST_SRC := src/cp/cluster.c src/cp/ring.c src/keypos/keypos.c src/vclock/vclock.c \
+                    src/cp/sm.c src/cp/store.c tests/cluster_test.c
 CLUSTER_TEST_BIN := $(BUILD_DIR)/cluster_test
 
 $(CLUSTER_TEST_BIN): $(CLUSTER_TEST_SRC) src/cp/cluster.h src/cp/ring.h src/cp/sm.h src/cp/store.h $(SIPHASH_OBJ)
