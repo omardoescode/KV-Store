@@ -295,6 +295,39 @@ class FailureTest(ClusterTest):
             os.kill(pid, signal.SIGCONT)
         self.assertEqual(c.get('k'), 'v2')
 
+    def test_read_repairs_a_stale_replica_that_answers_after_the_read_returns(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=3, KV_CP_REPLICAS=3, KV_CP_READ_QUORUM=2,
+                         KV_CP_WRITE_QUORUM=2, KV_CP_FORWARD_TIMEOUT_MS=3000,
+                         KV_CP_PROBE_FAILS=100).start(wait_nodes=3)
+
+        def posts(node, key):
+            with open(os.path.join(c.env['KV_CP_NODE_DIR'], f'node-{node}', 'kv.log')) as f:
+                return f.read().count(f'POST /{key} 200')
+
+        # Each node in turn is the stale one, so one of them is last in the preference list.
+        for stale in (1, 2, 3):
+            key = f'k{stale}'
+            self.assertEqual(c.put(key, 'old'), 200)
+            wait_for(lambda: posts(stale, key) == 1, 10, 'the put in the log')
+            old = json.loads(c.node_req(stale, 'GET', f'/_internal/get?key={key}')[1])
+            coord, n, _ = old['clock'].split(':')
+            newer = {'key': key, 'value': 'new', 'clock': f'{coord}:{int(n) + 1}:{old["ts"] + 1}',
+                     'ts': old['ts'] + 1, 'coord': int(coord), 'deleted': False}
+            for node in {1, 2, 3} - {stale}:
+                self.assertEqual(
+                    c.node_req(node, 'POST', '/_internal/batch', {'items': [newer]})[0], 200)
+            pid = c.node_pids()[stale]
+            os.kill(pid, signal.SIGSTOP)
+            resume = threading.Timer(0.5, os.kill, (pid, signal.SIGCONT))
+            resume.start()
+            try:
+                self.assertEqual(c.get(key), 'new')
+            finally:
+                resume.join()
+            wait_for(lambda: posts(stale, key) == 2, 10, f'read repair of node {stale}')
+            entry = json.loads(c.node_req(stale, 'GET', f'/_internal/get?key={key}')[1])
+            self.assertEqual(entry['value'], 'new')
+
     def test_write_fails_with_two_home_replicas_down_and_no_other_node_takes_it(self):
         c = self.cluster(KV_CP_INITIAL_NODES=4, KV_CP_MAX_NODES=4, KV_CP_REPLICAS=3,
                          KV_CP_READ_QUORUM=2, KV_CP_WRITE_QUORUM=2, KV_CP_FORWARD_TIMEOUT_MS=300,
