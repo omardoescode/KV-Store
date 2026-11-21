@@ -34,6 +34,15 @@ void ring_free(ring *r);
  */
 size_t ring_prefs(const ring *r, const char *key, size_t key_len, int *out);
 
+/**
+ * The ring points cut it into segments: segment i holds the positions in (end of i - 1, end of i],
+ * segment 0 wrapping past the top. Every key of a segment has the same preference list.
+ */
+size_t ring_segments(const ring *r);
+uint64_t ring_segment_end(const ring *r, size_t i);
+/** Write the preference list of the keys in segment i to out, like ring_prefs. */
+size_t ring_segment_prefs(const ring *r, size_t i, int *out);
+
 /** Return whether id is in the preference list of key. */
 int ring_has(const ring *r, int id, const char *key, size_t key_len);
 

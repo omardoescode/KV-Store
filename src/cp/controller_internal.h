@@ -17,9 +17,8 @@ struct controller {
   pthread_cond_t wake;
   bool stop;
   bool running;
-  /** start-up is done: a stop from now on is clean. */
-  bool up;
   int64_t last_scale_ms;
+  int64_t last_anti_entropy_ms;
   int64_t window_start_ms;
   uint64_t window_requests[CLUSTER_MAX_NODES + 1];
 };
@@ -28,6 +27,12 @@ struct controller {
 
 int64_t ctl_mono_ms(void);
 
+/**
+ * Anti-entropy: compare a digest of each ring segment on its live home replicas and copy the
+ * winner of each key that differs to the replicas without it. With repair (a node id), only the
+ * segments of that node, tombstones too; it fails if the node does not answer. Returns 0 or -1.
+ */
+int ctl_anti_entropy(controller *ctl, int repair);
 /** Spawn node id, seen DEAD, again with its data and repair it; or repair it, seen REPAIRING. */
 void ctl_heal(controller *ctl, int id, node_state state);
 /** Add one node. asked: POST /_cp/nodes asked for it, so an aborted join asks again. */

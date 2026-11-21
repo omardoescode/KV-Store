@@ -39,6 +39,18 @@ typedef int (*node_page_fn)(void *arg, const node_row *rows, size_t n);
 /** Call fn with every committed row, tombstones too, in key order. Returns 0 or -1. */
 int node_dump(const char *addr, node_page_fn fn, void *arg);
 
+/**
+ * Set hashes[i] to the node's digest of the ring segment that ends at ends[i] (increasing; see
+ * ring_segments): equal entries give equal digests. Returns 0 or -1.
+ */
+int node_digest(const char *addr, const uint64_t *ends, size_t n, uint64_t *hashes);
+
+/**
+ * Call fn once with every entry, tombstones too, whose key position is in (start, end]. Returns 0
+ * or -1.
+ */
+int node_range(const char *addr, uint64_t start, uint64_t end, node_page_fn fn, void *arg);
+
 /** Write rows; each applies by the winner rule against the node's entry. Returns 0 or -1. */
 int node_put_rows(const char *addr, const node_row *rows, size_t n);
 

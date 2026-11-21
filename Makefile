@@ -58,7 +58,7 @@ $(COMPDB): Makefile $(SRC)
 		case $$f in \
 			src/http/*) lib='$(H2O_CPPFLAGS)';; \
 			src/json/*) lib='$(YYJSON_CPPFLAGS)';; \
-			src/hashmap/*) lib='$(SIPHASH_CPPFLAGS)';; \
+			src/hashmap/*|src/keypos/*) lib='$(SIPHASH_CPPFLAGS)';; \
 			*) lib='';; \
 		esac; \
 		printf '%s\n{"directory":"%s","file":"%s","command":"$(CC) $(CPPFLAGS) %s $(CFLAGS) -c %s"}' \
@@ -100,6 +100,7 @@ $(H2O_LIB): $(H2O_DIR)/CMakeLists.txt
 $(BUILD_DIR)/http/%.o: CPPFLAGS += $(H2O_CPPFLAGS)
 $(BUILD_DIR)/json/%.o: CPPFLAGS += $(YYJSON_CPPFLAGS)
 $(BUILD_DIR)/hashmap/%.o: CPPFLAGS += $(SIPHASH_CPPFLAGS)
+$(BUILD_DIR)/keypos/%.o: CPPFLAGS += $(SIPHASH_CPPFLAGS)
 $(BUILD_DIR)/cp/%.o: CPPFLAGS += $(SIPHASH_CPPFLAGS) $(H2O_CPPFLAGS) $(YYJSON_CPPFLAGS)
 
 $(BUILD_DIR)/%.o: src/%.c | $(H2O_DIR)/CMakeLists.txt $(YYJSON_DIR)/src/yyjson.c $(SIPHASH_DIR)/siphash.c
@@ -153,7 +154,8 @@ $(CONFIG_TEST_BIN): $(CONFIG_TEST_SRC) src/config/config.h
 test-config: $(CONFIG_TEST_BIN)
 	./$(CONFIG_TEST_BIN)
 
-KV_STORE_TEST_SRC := src/kv/kv_store.c src/hashmap/hashmap.c src/vclock/vclock.c tests/kv_store_test.c
+KV_STORE_TEST_SRC := src/kv/kv_store.c src/hashmap/hashmap.c src/vclock/vclock.c \
+                     src/keypos/keypos.c tests/kv_store_test.c
 KV_STORE_TEST_BIN := $(BUILD_DIR)/kv_store_test
 
 $(KV_STORE_TEST_BIN): $(KV_STORE_TEST_SRC) src/kv/kv_store.h src/vclock/vclock.h src/hashmap/hashmap.h src/log/log.h $(SIPHASH_OBJ)
@@ -173,7 +175,7 @@ $(VCLOCK_TEST_BIN): $(VCLOCK_TEST_SRC) src/vclock/vclock.h
 test-vclock: $(VCLOCK_TEST_BIN)
 	./$(VCLOCK_TEST_BIN)
 
-RING_TEST_SRC := src/cp/ring.c tests/ring_test.c
+RING_TEST_SRC := src/cp/ring.c src/keypos/keypos.c tests/ring_test.c
 RING_TEST_BIN := $(BUILD_DIR)/ring_test
 
 $(RING_TEST_BIN): $(RING_TEST_SRC) src/cp/ring.h $(SIPHASH_OBJ)
@@ -193,7 +195,8 @@ $(SM_TEST_BIN): $(SM_TEST_SRC) src/cp/sm.h
 test-sm: $(SM_TEST_BIN)
 	./$(SM_TEST_BIN)
 
-CLUSTER_TEST_SRC := src/cp/cluster.c src/cp/ring.c src/cp/sm.c src/cp/store.c tests/cluster_test.c
+CLUSTER_TEST_SRC := src/cp/cluster.c src/cp/ring.c src/keypos/keypos.c src/cp/sm.c src/cp/store.c \
+                    tests/cluster_test.c
 CLUSTER_TEST_BIN := $(BUILD_DIR)/cluster_test
 
 $(CLUSTER_TEST_BIN): $(CLUSTER_TEST_SRC) src/cp/cluster.h src/cp/ring.h src/cp/sm.h src/cp/store.h $(SIPHASH_OBJ)
@@ -214,7 +217,7 @@ test-resolve: $(RESOLVE_TEST_BIN)
 	./$(RESOLVE_TEST_BIN)
 
 CTL_TEST_SRC := src/cp/controller.c src/cp/nodes.c src/cp/cluster.c \
-                src/cp/ring.c src/cp/sm.c src/cp/store.c src/vclock/vclock.c \
+                src/cp/ring.c src/keypos/keypos.c src/cp/sm.c src/cp/store.c src/vclock/vclock.c \
                 tests/node_client_fake.c tests/driver_fake.c \
                 tests/controller_test.c
 CTL_TEST_BIN := $(BUILD_DIR)/controller_test

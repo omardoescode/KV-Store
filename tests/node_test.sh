@@ -100,4 +100,31 @@ expect_body '{"items":[{"key":"sa","value":"","clock":"","ts":0,"coord":0,"delet
   "$url/_internal/dump"
 stop
 
+# Anti-entropy reads: a ring segment's digest changes only when one of its entries changes, and a
+# range gives the entries of a segment, tombstones too. End -1 is the top of the ring as int64, so
+# one segment holds every key.
+rm -f "$KV_DB_PATH"*
+start
+stamped() {
+  curl -sf -X "$1" -H "x-kv-clock: $2" -H "x-kv-ts: $3" -H 'x-kv-coord: 1' "$4" "$5" >/dev/null
+}
+stamped POST 1:2 2 -d'{"value":"a"}' "$url/ae-a"
+stamped POST 1:1 1 -d'{"value":"b"}' "$url/ae-b"
+curl -s -o /dev/null -X DELETE -H 'x-kv-clock: 1:2' -H 'x-kv-ts: 2' -H 'x-kv-coord: 1' "$url/ae-b"
+digest() { curl -s -X POST -d '{"ends":[-1]}' "$url/_internal/digest"; }
+d1=$(digest)
+case $d1 in '{"hashes":['*']}') ;; *) fail "bad digest $d1" ;; esac
+[ "$d1" != '{"hashes":[0]}' ] || fail "digest of two entries is 0"
+stamped POST 1:1 9 -d'{"value":"older"}' "$url/ae-a"
+[ "$(digest)" = "$d1" ] || fail "a dominated write changed the digest"
+stamped POST 1:3 3 -d'{"value":"newer"}' "$url/ae-a"
+[ "$(digest)" != "$d1" ] || fail "a newer write kept the digest"
+range=$(curl -s "$url/_internal/range?start=0&end=0")
+case $range in *'{"key":"ae-a","value":"newer","clock":"1:3","ts":3,"coord":1,"deleted":false}'*) ;;
+*) fail "range misses ae-a: $range" ;; esac
+case $range in *'{"key":"ae-b","value":"","clock":"1:2","ts":2,"coord":1,"deleted":true}'*) ;;
+*) fail "range misses the tombstone of ae-b: $range" ;; esac
+[ "$(echo "$range" | grep -o '"key"' | wc -l)" = 2 ] || fail "range has other keys: $range"
+stop
+
 echo "node_test: OK"

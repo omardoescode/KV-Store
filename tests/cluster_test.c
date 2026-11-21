@@ -22,14 +22,6 @@ static const cp_config cfg = {
     .vnodes = 128,
     .probe_fails = 2,
 };
-static const cp_config cfg_rf2 = {
-    .max_nodes = 4,
-    .replicas = 2,
-    .read_quorum = 1,
-    .write_quorum = 1,
-    .vnodes = 128,
-    .probe_fails = 2,
-};
 static const cp_config cfg_rf3 = {
     .max_nodes = 4,
     .replicas = 3,

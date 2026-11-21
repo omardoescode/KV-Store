@@ -39,11 +39,6 @@ int cp_store_put_migration(cp_store *s, stored_migration m);
 /** Read the migration record; IDLE with target 0 if none. Returns 0 or -1. */
 int cp_store_migration(cp_store *s, stored_migration *out);
 
-/** Store whether a cp runs on this store; still set at start-up means the last cp crashed. */
-int cp_store_put_running(cp_store *s, bool running);
-/** Read the running flag, false if none. Returns 0 or -1. */
-int cp_store_running(cp_store *s, bool *out);
-
 int cp_store_put_version_mark(cp_store *s, uint64_t mark);
 /** Read the version mark, 0 if none. Returns 0 or -1. */
 int cp_store_version_mark(cp_store *s, uint64_t *out);

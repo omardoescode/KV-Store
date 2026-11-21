@@ -1,9 +1,11 @@
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cp/node_client.h"
 #include "cp_fake.h"
+#include "keypos/keypos.h"
 
 enum { FAKE_NODES = 16, FAKE_ROWS = 64, FAKE_LEN = 32, FAKE_PORT = 9100 };
 
@@ -119,6 +121,46 @@ int node_dump(const char *addr, node_page_fn fn, void *arg) {
     rows[i] = (node_row){r->key, strlen(r->key), r->value, strlen(r->value), r->stamp, r->deleted};
   }
   return fn(arg, rows, n->n) == 0 ? 0 : -1;
+}
+
+int node_digest(const char *addr, const uint64_t *ends, size_t n, uint64_t *hashes) {
+  fake_node *node = node_at(addr);
+  if (!node) {
+    return -1;
+  }
+  memset(hashes, 0, n * sizeof(*hashes));
+  for (size_t i = 0; i != node->n; i++) {
+    const fake_row *r = &node->rows[i];
+    uint64_t pos = key_position(r->key, strlen(r->key));
+    size_t seg = 0;
+    while (seg != n && ends[seg] < pos) {
+      seg++;
+    }
+    char clock[VCLOCK_TEXT_MAX];
+    (void)vclock_encode(&r->stamp.clock, clock);
+    char text[VCLOCK_TEXT_MAX + 128];
+    int len = snprintf(text, sizeof(text), "%s %s %" PRIu64 " %d %d", r->key, clock, r->stamp.ts,
+                       r->stamp.coord, r->deleted);
+    hashes[seg == n ? 0 : seg] ^= key_position(text, (size_t)len);
+  }
+  return 0;
+}
+
+int node_range(const char *addr, uint64_t start, uint64_t end, node_page_fn fn, void *arg) {
+  fake_node *node = node_at(addr);
+  if (!node) {
+    return -1;
+  }
+  node_row rows[FAKE_ROWS];
+  size_t count = 0;
+  for (size_t i = 0; i != node->n; i++) {
+    const fake_row *r = &node->rows[i];
+    if (key_in_segment(key_position(r->key, strlen(r->key)), start, end)) {
+      rows[count++] =
+          (node_row){r->key, strlen(r->key), r->value, strlen(r->value), r->stamp, r->deleted};
+    }
+  }
+  return fn(arg, rows, count) == 0 ? 0 : -1;
 }
 
 int node_put_rows(const char *addr, const node_row *rows, size_t n) {

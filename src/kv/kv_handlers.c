@@ -408,6 +408,78 @@ static void dump_handler(http_response *response, const http_request *request, v
   json_builder_free(page.b);
 }
 
+/**
+ * POST /_internal/digest {"ends":[int]}: ring positions in increasing order, each a uint64 sent as
+ * the int64 of the same bits. Responds {"hashes":[int]}: the digest of each segment, see
+ * kv_store_digest.
+ */
+static void digest_handler(http_response *response, const http_request *request, void *arg) {
+  http_str body = http_req_body(request);
+  json_doc *doc = json_parse(body.ptr, body.len);
+  const json_val *ends = json_get(json_doc_root(doc), "ends");
+  size_t n = json_len(ends);
+  uint64_t *pos = json_type_of(ends) == JSON_ARRAY ? calloc(n ? n : 1, 2 * sizeof(*pos)) : NULL;
+  bool ok = pos != NULL;
+  for (size_t i = 0; ok && i != n; i++) {
+    const json_val *v = json_at(ends, i);
+    pos[i] = (uint64_t)json_int(v);
+    ok = (bool)(json_type_of(v) == JSON_NUMBER && (i == 0 || pos[i] > pos[i - 1]));
+  }
+  json_doc_free(doc);
+  if (!ok) {
+    free(pos);
+    write_message(response, 400, "want {\"ends\":[int64]} in increasing uint64 order\n");
+    return;
+  }
+  uint64_t *hashes = pos + n;
+  json_builder *b = json_builder_new();
+  json_node *root = json_new_obj(b);
+  json_node *arr = json_new_arr(b);
+  ok = (bool)(kv_store_digest(arg, pos, n, hashes) == 0 && json_put(b, root, "hashes", arr));
+  for (size_t i = 0; ok && i != n; i++) {
+    ok = json_push(arr, json_new_int(b, (int64_t)hashes[i]));
+  }
+  write_json(response, ok ? root : NULL);
+  json_builder_free(b);
+  free(pos);
+}
+
+/** Set *out from query parameter name, a decimal uint64. Returns false if absent or malformed. */
+static bool query_u64(const http_request *request, http_str name, uint64_t *out) {
+  http_str v = http_req_query(request, name);
+  *out = 0;
+  for (size_t i = 0; i != v.len; i++) {
+    unsigned digit = (unsigned)(unsigned char)v.ptr[i] - '0';
+    if (digit > 9 || *out > (UINT64_MAX - digit) / 10) {
+      return false;
+    }
+    *out = (*out * 10) + digit;
+  }
+  return v.len != 0;
+}
+
+/**
+ * GET /_internal/range?start=<uint64>&end=<uint64>: the entries, tombstones too, whose key
+ * position is in (start, end], as {"items":[{key,value,clock,ts,coord,deleted}]}.
+ */
+static void range_handler(http_response *response, const http_request *request, void *arg) {
+  uint64_t start = 0;
+  uint64_t end = 0;
+  if (!query_u64(request, HTTP_STR("start"), &start) ||
+      !query_u64(request, HTTP_STR("end"), &end)) {
+    write_message(response, 400, "want ?start=<uint64>&end=<uint64>\n");
+    return;
+  }
+  dump_page page = {json_builder_new(), NULL, NULL};
+  json_node *root = json_new_obj(page.b);
+  page.items = json_new_arr(page.b);
+  int count = page.items ? kv_store_range(arg, start, end, add_dump_row, &page) : -1;
+  bool ok = (bool)(count >= 0 && json_put(page.b, root, "items", page.items));
+  write_json(response, ok ? root : NULL);
+  free(page.last);
+  json_builder_free(page.b);
+}
+
 /** Map a kv_store change result to an HTTP status: -2 is 503, other negatives 500. */
 static int status_of(int rc) {
   if (rc == -2) {
@@ -530,6 +602,8 @@ void kv_register_routes(http_server *server, kv_store *store, logger *log, bool 
   http_handle(server, HTTP_GET, "/_internal/health", health_handler, NULL);
   http_handle(server, HTTP_GET, "/_internal/dump", dump_handler, store);
   http_handle(server, HTTP_GET, "/_internal/get", get_entry_handler, store);
+  http_handle(server, HTTP_POST, "/_internal/digest", digest_handler, store);
+  http_handle(server, HTTP_GET, "/_internal/range", range_handler, store);
   http_handle(server, HTTP_POST, "/_internal/batch", batch_handler, store);
   http_handle(server, HTTP_POST, "/_internal/delete-batch", delete_batch_handler, store);
   http_handle(server, HTTP_POST, "/_internal/purge", purge_handler, store);

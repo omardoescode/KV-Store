@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "siphash.h"
+#include "keypos/keypos.h"
 
 typedef struct {
   uint64_t pos;
@@ -18,19 +18,6 @@ struct ring {
   size_t node_count;
   int replicas;
 };
-
-// The ASCII bytes of "kv-store-ring-01". Changing them moves every key.
-static const uint8_t ring_key[16] = {
-    'k', 'v', '-', 's', 't', 'o', 'r', 'e', '-', 'r', 'i', 'n', 'g', '-', '0', '1',
-};
-
-static uint64_t position(const void *data, size_t len) {
-  uint8_t out[8];
-  (void)siphash(data, len, ring_key, out, sizeof(out));
-  uint64_t v;
-  memcpy(&v, out, sizeof(v));
-  return v;
-}
 
 static int by_position(const void *lhs, const void *rhs) {
   const point *pa = lhs;
@@ -64,7 +51,7 @@ ring *ring_new(const int *ids, size_t n, ring_params params) {
     for (int v = 0; v != vnodes; v++) {
       char name[32];
       int len = snprintf(name, sizeof(name), "%d#%d", ids[i], v);
-      r->points[k++] = (point){position(name, (size_t)len), ids[i]};
+      r->points[k++] = (point){key_position(name, (size_t)len), ids[i]};
     }
   }
   qsort(r->points, r->count, sizeof(*r->points), by_position);
@@ -109,7 +96,15 @@ static size_t prefs_at(const ring *r, uint64_t pos, int *out) {
 }
 
 size_t ring_prefs(const ring *r, const char *key, size_t key_len, int *out) {
-  return prefs_at(r, position(key, key_len), out);
+  return prefs_at(r, key_position(key, key_len), out);
+}
+
+size_t ring_segments(const ring *r) { return r->count; }
+
+uint64_t ring_segment_end(const ring *r, size_t i) { return r->points[i].pos; }
+
+size_t ring_segment_prefs(const ring *r, size_t i, int *out) {
+  return prefs_at(r, r->points[i].pos, out);
 }
 
 static int by_value(const void *lhs, const void *rhs) {
@@ -182,14 +177,9 @@ int ring_diff(const ring *from, const ring *to, ring_range **out, size_t *n) {
 }
 
 bool ring_ranges_have(const ring_range *ranges, size_t n, const char *key, size_t key_len) {
-  uint64_t pos = position(key, key_len);
+  uint64_t pos = key_position(key, key_len);
   for (size_t i = 0; i != n; i++) {
-    ring_range r = ranges[i];
-    if (r.start < r.end) {
-      if (pos > r.start && pos <= r.end) {
-        return true;
-      }
-    } else if (pos > r.start || pos <= r.end) {
+    if (key_in_segment(pos, ranges[i].start, ranges[i].end)) {
       return true;
     }
   }

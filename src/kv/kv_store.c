@@ -1,6 +1,8 @@
 #include "kv_store.h"
 #include "hashmap/hashmap.h"
+#include "keypos/keypos.h"
 #include <errno.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdbool.h>
@@ -792,6 +794,87 @@ int kv_store_dump(kv_store *store, const char *after, size_t limit, kv_dump_fn f
   sqlite3_clear_bindings(stmt);
   pthread_mutex_unlock(&store->reader_mu);
   return rc == SQLITE_DONE ? count : -1;
+}
+
+typedef struct {
+  const uint64_t *ends;
+  size_t n;
+  uint64_t *hashes;
+} digest_ctx;
+
+static int digest_entry(const char *key, size_t key_len, const void *val, size_t val_len,
+                        void *arg) {
+  digest_ctx *d = arg;
+  vstamp stamp;
+  int64_t deleted = 0;
+  size_t at = 0;
+  if (decode_entry(val, val_len, &stamp, &deleted, &at) != 0) {
+    return -1;
+  }
+  uint64_t pos = key_position(key, key_len);
+  size_t lo = 0;
+  size_t hi = d->n;
+  while (lo < hi) {
+    size_t mid = lo + ((hi - lo) / 2);
+    if (d->ends[mid] < pos) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  char clock[VCLOCK_TEXT_MAX];
+  (void)vclock_encode(&stamp.clock, clock);
+  char tail[VCLOCK_TEXT_MAX + 64];
+  int tail_len = snprintf(tail, sizeof(tail), "\n%s\n%" PRIu64 "\n%d\n%d", clock, stamp.ts,
+                          stamp.coord, deleted != 0);
+  size_t len = key_len + (size_t)tail_len;
+  char *buf = malloc(len);
+  if (!buf) {
+    return -1;
+  }
+  memcpy(buf, key, key_len);
+  memcpy(buf + key_len, tail, (size_t)tail_len);
+  d->hashes[lo == d->n ? 0 : lo] ^= key_position(buf, len);
+  free(buf);
+  return 0;
+}
+
+int kv_store_digest(kv_store *store, const uint64_t *ends, size_t n, uint64_t *hashes) {
+  memset(hashes, 0, n * sizeof(*hashes));
+  digest_ctx d = {ends, n, hashes};
+  return n == 0 || hashmap_foreach(store->map, digest_entry, &d) == 0 ? 0 : -1;
+}
+
+typedef struct {
+  uint64_t start;
+  uint64_t end;
+  kv_dump_fn fn;
+  void *ctx;
+  int count;
+} range_ctx;
+
+static int range_entry(const char *key, size_t key_len, const void *val, size_t val_len,
+                       void *arg) {
+  range_ctx *r = arg;
+  if (!key_in_segment(key_position(key, key_len), r->start, r->end)) {
+    return 0;
+  }
+  kv_dump_row row = {.key = key};
+  int64_t deleted = 0;
+  size_t at = 0;
+  if (decode_entry(val, val_len, &row.stamp, &deleted, &at) != 0) {
+    return -1;
+  }
+  row.value = (const unsigned char *)val + at;
+  row.value_len = val_len - at;
+  row.deleted = deleted != 0;
+  r->count++;
+  return r->fn(r->ctx, &row) == 0 ? 0 : -1;
+}
+
+int kv_store_range(kv_store *store, uint64_t start, uint64_t end, kv_dump_fn fn, void *ctx) {
+  range_ctx r = {start, end, fn, ctx, 0};
+  return hashmap_foreach(store->map, range_entry, &r) == 0 ? r.count : -1;
 }
 
 void kv_store_pause_purge(kv_store *store, bool paused) {

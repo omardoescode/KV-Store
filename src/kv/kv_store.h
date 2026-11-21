@@ -101,6 +101,21 @@ int kv_store_remove(kv_store *store, const char *key);
  */
 int kv_store_dump(kv_store *store, const char *after, size_t limit, kv_dump_fn fn, void *ctx);
 
+/**
+ * For the n ring segments that end at the increasing positions ends (segment i holds the key
+ * positions in (ends[i - 1], ends[i]], segment 0 wrapping past the top), set hashes[i] to the XOR
+ * of a hash of each entry's key, stamp and deleted flag, tombstones too. Equal entries give equal
+ * hashes on every node. Reads the map, so changes not committed yet count. Returns 0 or -1.
+ */
+int kv_store_digest(kv_store *store, const uint64_t *ends, size_t n, uint64_t *hashes);
+
+/**
+ * Call fn for each entry, tombstones too, whose key position is in (start, end], wrapping past
+ * the top; start == end is the whole ring. Reads the map; fn must not call kv_store. Returns the
+ * entry count, or -1 on error.
+ */
+int kv_store_range(kv_store *store, uint64_t start, uint64_t end, kv_dump_fn fn, void *ctx);
+
 /** Pause or resume the tombstone purge. Returns after a running purge round ends. */
 void kv_store_pause_purge(kv_store *store, bool paused);
 

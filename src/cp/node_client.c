@@ -1,5 +1,6 @@
 #include "cp/node_client.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,32 +52,28 @@ int node_flush(const char *addr) {
   return call(addr, &req, NULL) == 200 ? 0 : -1;
 }
 
-/** Fetch the page after cursor and pass it to fn. Sets *next to the next cursor, or NULL. */
-static int dump_page(const char *addr, node_page_fn fn, void *arg, const char *cursor,
-                     char **next) {
-  *next = NULL;
-  size_t path_len = strlen(cursor) + 64;
-  char *path = malloc(path_len);
-  if (!path) {
-    return -1;
-  }
-  (void)snprintf(path, path_len, "/_internal/dump?limit=%d&cursor=%s", DUMP_PAGE, cursor);
+/**
+ * GET path, a page of rows {"items":[{key,value,clock,ts,coord,deleted}]}, and pass its rows to
+ * fn. Returns 0 or -1; sets *out to the parsed page, which the caller frees, or NULL.
+ */
+static int fetch_rows(const char *addr, node_page_fn fn, void *arg, const char *path,
+                      json_doc **out) {
+  *out = NULL;
   hclient_req req = {"GET", path, NULL, NULL, 0, call_timeout_ms};
   hclient_resp resp = {0, NULL, 0};
   int status = call(addr, &req, &resp);
-  free(path);
   if (status != 200) {
     free(resp.body);
     return -1;
   }
   json_doc *doc = json_parse(resp.body, resp.len);
   free(resp.body);
+  *out = doc;
   const json_val *items = json_get(json_doc_root(doc), "items");
   size_t n = json_len(items);
   node_row *rows = calloc(n ? n : 1, sizeof(*rows));
   if (json_type_of(items) != JSON_ARRAY || !rows) {
     free(rows);
-    json_doc_free(doc);
     return -1;
   }
   size_t count = 0;
@@ -100,6 +97,22 @@ static int dump_page(const char *addr, node_page_fn fn, void *arg, const char *c
   }
   int rc = fn(arg, rows, count) == 0 ? 0 : -1;
   free(rows);
+  return rc;
+}
+
+/** Fetch the dump page after cursor and pass it to fn. Sets *next to the next cursor, or NULL. */
+static int dump_page(const char *addr, node_page_fn fn, void *arg, const char *cursor,
+                     char **next) {
+  *next = NULL;
+  size_t path_len = strlen(cursor) + 64;
+  char *path = malloc(path_len);
+  if (!path) {
+    return -1;
+  }
+  (void)snprintf(path, path_len, "/_internal/dump?limit=%d&cursor=%s", DUMP_PAGE, cursor);
+  json_doc *doc = NULL;
+  int rc = fetch_rows(addr, fn, arg, path, &doc);
+  free(path);
   size_t next_len = 0;
   const char *next_key = json_str(json_get(json_doc_root(doc), "next"), &next_len);
   if (rc == 0 && next_key) {
@@ -127,6 +140,44 @@ int node_dump(const char *addr, node_page_fn fn, void *arg) {
     cursor = next;
   }
   return -1;
+}
+
+int node_range(const char *addr, uint64_t start, uint64_t end, node_page_fn fn, void *arg) {
+  char path[96];
+  (void)snprintf(path, sizeof(path), "/_internal/range?start=%" PRIu64 "&end=%" PRIu64, start, end);
+  json_doc *doc = NULL;
+  int rc = fetch_rows(addr, fn, arg, path, &doc);
+  json_doc_free(doc);
+  return rc;
+}
+
+int node_digest(const char *addr, const uint64_t *ends, size_t n, uint64_t *hashes) {
+  json_builder *b = json_builder_new();
+  json_node *arr = json_new_arr(b);
+  json_node *root = json_new_obj(b);
+  bool ok = json_put(b, root, "ends", arr);
+  for (size_t i = 0; ok && i != n; i++) {
+    ok = json_push(arr, json_new_int(b, (int64_t)ends[i]));
+  }
+  size_t len = 0;
+  char *body = ok ? json_to_bytes(root, &len) : NULL;
+  json_builder_free(b);
+  if (!body) {
+    return -1;
+  }
+  hclient_req req = {"POST", "/_internal/digest", NULL, body, len, call_timeout_ms};
+  hclient_resp resp = {0, NULL, 0};
+  int status = call(addr, &req, &resp);
+  free(body);
+  json_doc *doc = status == 200 ? json_parse(resp.body, resp.len) : NULL;
+  free(resp.body);
+  const json_val *got = json_get(json_doc_root(doc), "hashes");
+  int rc = json_type_of(got) == JSON_ARRAY && json_len(got) == n ? 0 : -1;
+  for (size_t i = 0; rc == 0 && i != n; i++) {
+    hashes[i] = (uint64_t)json_int(json_at(got, i));
+  }
+  json_doc_free(doc);
+  return rc;
 }
 
 int node_put_rows(const char *addr, const node_row *rows, size_t n) {

@@ -7,6 +7,9 @@
 #include <string.h>
 #include <time.h>
 
+// Ms between anti-entropy rounds.
+enum { ANTI_ENTROPY_MS = 1000 };
+
 int64_t ctl_mono_ms(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -26,6 +29,7 @@ controller *controller_new(cluster *c, cp_store *store, const cp_config *cfg, lo
   pthread_cond_init(&ctl->wake, NULL);
   ctl->last_scale_ms = ctl_mono_ms() - ((int64_t)ctl->cfg->scale_cooldown_s * 1000);
   ctl->window_start_ms = ctl_mono_ms();
+  ctl->last_anti_entropy_ms = ctl_mono_ms() - ANTI_ENTROPY_MS;
   return ctl;
 }
 
@@ -56,7 +60,7 @@ static void heal(controller *ctl) {
       ctl_heal(ctl, id, NODE_DEAD);
     }
   }
-  // A node left REPAIRING (it missed a write, its repair failed, or cp restarted) gets its
+  // A node left REPAIRING (its repair failed, or cp restarted) gets its
   // repair once it answers probes.
   cluster_snapshot(ctl->c, &v);
   for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
@@ -110,6 +114,12 @@ void controller_tick(controller *ctl) {
   heal(ctl);
   static cluster_view v;
   cluster_snapshot(ctl->c, &v);
+  if (v.phase == MIG_IDLE && ctl_mono_ms() - ctl->last_anti_entropy_ms >= ANTI_ENTROPY_MS) {
+    if (ctl_anti_entropy(ctl, 0) != 0) {
+      LOGF(ctl, LOG_WARN, "anti-entropy: a round failed");
+    }
+    ctl->last_anti_entropy_ms = ctl_mono_ms();
+  }
   if (v.phase == MIG_PURGE) {
     ctl_finish_join(ctl, v.phase, v.target);
   } else {
@@ -156,9 +166,6 @@ void controller_free(controller *ctl) {
     pthread_cond_signal(&ctl->wake);
     pthread_mutex_unlock(&ctl->mu);
     pthread_join(ctl->thread, NULL);
-  }
-  if (ctl->up) {
-    (void)cp_store_put_running(ctl->store, false);
   }
   pthread_mutex_destroy(&ctl->mu);
   pthread_cond_destroy(&ctl->wake);

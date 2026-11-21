@@ -1,13 +1,20 @@
-// Node lifecycle on the controller thread: respawn and repair, joins, and the start-up reconcile.
+// Node lifecycle on the controller thread: anti-entropy, respawn and repair, and joins.
 #include "cp/controller_internal.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #include "cp/node_client.h"
 
-enum { BATCH_ROWS = 500, DRAIN_TIMEOUT_MS = 30000, SPAWN_WAIT_MS = 15000, START_SPAWN_TRIES = 5 };
+enum {
+  BATCH_ROWS = 500,
+  AE_BATCH = 100,
+  DRAIN_TIMEOUT_MS = 30000,
+  SPAWN_WAIT_MS = 15000,
+  START_SPAWN_TRIES = 5,
+};
 
 static void sleep_ms(int ms) {
   struct timespec ts = {ms / 1000, (long)(ms % 1000) * 1000000L};
@@ -51,7 +58,10 @@ static int move_page(void *arg, const node_row *rows, size_t n) {
     const node_row *r = &rows[i];
     bool moves = false;
     if (m->target != 0) {
-      moves = xfer_source(m->x, r->key, r->key_len, m->target) == m->node;
+      // Every reader sends: with W < N one replica may miss an acked write, and the target takes
+      // the winner by the fixed rule.
+      moves = (bool)(xfer_source(m->x, r->key, r->key_len, m->target) != 0 &&
+                     ring_has(m->x->from, m->node, r->key, r->key_len));
     } else {
       moves = xfer_drops(m->x, m->node, r->key, r->key_len);
     }
@@ -94,34 +104,226 @@ static void pause_purge(controller *ctl, bool paused) {
   }
 }
 
-/** Copy the keys of node id from the replicas that serve reads. Returns 0 or -1. */
+/** One entry of a replica, copied out of a page. */
+typedef struct {
+  char *key;
+  size_t key_len;
+  char *value;
+  size_t value_len;
+  vstamp stamp;
+  bool deleted;
+  /** Index of the replica in the segment's list. */
+  size_t src;
+} ae_row;
+
+typedef struct {
+  ae_row *rows;
+  size_t n;
+  size_t cap;
+  size_t src;
+} ae_rows;
+
+static int collect(void *arg, const node_row *rows, size_t n) {
+  ae_rows *a = arg;
+  for (size_t i = 0; i != n; i++) {
+    if (a->n == a->cap) {
+      size_t cap = a->cap ? a->cap * 2 : 64;
+      ae_row *grown = realloc(a->rows, cap * sizeof(*grown));
+      if (!grown) {
+        return -1;
+      }
+      a->rows = grown;
+      a->cap = cap;
+    }
+    const node_row *r = &rows[i];
+    ae_row *out = &a->rows[a->n];
+    out->key = malloc(r->key_len + r->value_len + 1);
+    if (!out->key) {
+      return -1;
+    }
+    memcpy(out->key, r->key, r->key_len);
+    out->key_len = r->key_len;
+    out->value = out->key + r->key_len;
+    memcpy(out->value, r->value, r->value_len);
+    out->value_len = r->value_len;
+    out->stamp = r->stamp;
+    out->deleted = r->deleted;
+    out->src = a->src;
+    a->n++;
+  }
+  return 0;
+}
+
+static int by_key(const void *lhs, const void *rhs) {
+  const ae_row *a = lhs;
+  const ae_row *b = rhs;
+  size_t n = a->key_len < b->key_len ? a->key_len : b->key_len;
+  int c = memcmp(a->key, b->key, n);
+  if (c != 0) {
+    return c;
+  }
+  return (a->key_len > b->key_len) - (a->key_len < b->key_len);
+}
+
+static bool same_stamp(const vstamp *a, const vstamp *b) {
+  return (bool)(a->ts == b->ts && a->coord == b->coord &&
+                vclock_compare(&a->clock, &b->clock) == VCLOCK_EQUAL);
+}
+
+/** The replicas of one segment and the rows to send each. */
+typedef struct {
+  const cluster_view *v;
+  const int *ids;
+  size_t m;
+  bool to_missing;
+  node_row queues[RING_MAX_REPLICAS][AE_BATCH];
+  size_t lens[RING_MAX_REPLICAS];
+} ae_out;
+
+/** Send the rows queued for replica j. Returns 0 or -1. */
+static int flush_queue(ae_out *out, size_t j) {
+  int rc = out->lens[j]
+               ? node_put_rows(out->v->nodes[out->ids[j]].addr, out->queues[j], out->lens[j])
+               : 0;
+  out->lens[j] = 0;
+  return rc;
+}
+
+/**
+ * Queue the winner of the key rows[0..n) to every replica without it. A tombstone goes to a
+ * replica without the key only when out->to_missing (a repair): else a purged tombstone would
+ * come back. Returns 0 or -1.
+ */
+static int send_winner(ae_out *out, const ae_row *rows, size_t n) {
+  size_t win = 0;
+  vstamp merged = rows[0].stamp;
+  for (size_t k = 1; k != n; k++) {
+    vstamp next;
+    int pick = vstamp_pick(&merged, &rows[k].stamp, &next);
+    if (pick < 0) {
+      return -1;
+    }
+    win = pick == 1 ? k : win;
+    merged = next;
+  }
+  bool has[RING_MAX_REPLICAS] = {false};
+  bool fresh[RING_MAX_REPLICAS] = {false};
+  for (size_t k = 0; k != n; k++) {
+    has[rows[k].src] = true;
+    fresh[rows[k].src] = same_stamp(&rows[k].stamp, &merged);
+  }
+  const ae_row *w = &rows[win];
+  node_row row = {w->key, w->key_len, w->value, w->value_len, merged, w->deleted};
+  for (size_t j = 0; j != out->m; j++) {
+    if (!fresh[j] && (has[j] || !w->deleted || out->to_missing)) {
+      out->queues[j][out->lens[j]++] = row;
+      if (out->lens[j] == AE_BATCH && flush_queue(out, j) != 0) {
+        return -1;
+      }
+    }
+  }
+  return 0;
+}
+
+/** Make the replicas of out agree on the keys of segment r. Returns 0 or -1. */
+static int sync_segment(ae_out *out, ring_range r) {
+  ae_rows all = {0};
+  int rc = 0;
+  for (size_t j = 0; j != out->m && rc == 0; j++) {
+    all.src = j;
+    rc = node_range(out->v->nodes[out->ids[j]].addr, r.start, r.end, collect, &all);
+  }
+  if (all.n) {
+    qsort(all.rows, all.n, sizeof(*all.rows), by_key);
+  }
+  for (size_t g = 0, next = 0; rc == 0 && g != all.n; g = next) {
+    for (next = g + 1; next != all.n && by_key(&all.rows[g], &all.rows[next]) == 0; next++) {
+    }
+    rc = send_winner(out, &all.rows[g], next - g);
+  }
+  // Queued rows point into all.rows: send them before those are freed.
+  for (size_t j = 0; j != out->m; j++) {
+    rc = flush_queue(out, j) != 0 ? -1 : rc;
+  }
+  for (size_t i = 0; i != all.n; i++) {
+    free(all.rows[i].key);
+  }
+  free(all.rows);
+  return rc;
+}
+
+/**
+ * Set digests[id] to a malloc'd digest of each of the n segments ending at ends, for each live
+ * ring node that answers; NULL for the others.
+ */
+static void take_digests(const cluster_view *v, const uint64_t *ends, size_t n,
+                         uint64_t **digests) {
+  for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
+    const cluster_node *node = &v->nodes[id];
+    digests[id] = NULL;
+    if (node->exists && node->in_ring && node_takes_writes(node->sm.state)) {
+      digests[id] = malloc(n * sizeof(**digests));
+      if (digests[id] && node_digest(node->addr, ends, n, digests[id]) != 0) {
+        free(digests[id]);
+        digests[id] = NULL;
+      }
+    }
+  }
+}
+
+int ctl_anti_entropy(controller *ctl, int repair) {
+  static cluster_view v;
+  cluster_snapshot(ctl->c, &v);
+  size_t n = v.ring ? ring_segments(v.ring) : 0;
+  if (n == 0) {
+    return 0;
+  }
+  uint64_t *ends = malloc(n * sizeof(*ends));
+  if (!ends) {
+    return -1;
+  }
+  for (size_t i = 0; i != n; i++) {
+    ends[i] = ring_segment_end(v.ring, i);
+  }
+  static uint64_t *digests[CLUSTER_MAX_NODES + 1];
+  take_digests(&v, ends, n, digests);
+  int rc = repair && !digests[repair] ? -1 : 0;
+  static ae_out out;
+  int ids[RING_MAX_REPLICAS];
+  out = (ae_out){.v = &v, .ids = ids, .to_missing = repair != 0};
+  for (size_t i = 0; rc == 0 && i != n; i++) {
+    int prefs[RING_MAX_REPLICAS];
+    size_t np = ring_segment_prefs(v.ring, i, prefs);
+    out.m = 0;
+    bool differ = false;
+    bool has_repair = repair == 0;
+    for (size_t j = 0; j != np; j++) {
+      const uint64_t *d = digests[prefs[j]];
+      if (d) {
+        differ = (bool)(differ || (out.m != 0 && d[i] != digests[ids[0]][i]));
+        has_repair = (bool)(has_repair || prefs[j] == repair);
+        ids[out.m++] = prefs[j];
+      }
+    }
+    if (differ && has_repair) {
+      rc = sync_segment(&out, (ring_range){ends[i == 0 ? n - 1 : i - 1], ends[i]});
+    }
+  }
+  for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
+    free(digests[id]);
+  }
+  free(ends);
+  return rc;
+}
+
+/** Bring node id up to date with anti-entropy against its peers. Returns 0 or -1. */
 static int repair(controller *ctl, int id) {
   driver_fault_point("REPAIR", id);
-  (void)cluster_take_missed_write(ctl->c, id);
   // Writes that started before the node was REPAIRING did not go to it.
   if (cluster_drain(ctl->c, DRAIN_TIMEOUT_MS) != 0) {
     return -1;
   }
-  pause_purge(ctl, true);
-  static cluster_view v;
-  cluster_snapshot(ctl->c, &v);
-  static bool readers[CLUSTER_MAX_NODES + 1];
-  for (int src = 1; src <= CLUSTER_MAX_NODES; src++) {
-    readers[src] = (bool)(v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state));
-  }
-  xfer x = {v.ring, v.ring, readers};
-  int rc = 0;
-  for (int src = 1; src <= CLUSTER_MAX_NODES && rc == 0; src++) {
-    if (readers[src]) {
-      rc = move_rows(ctl, &x, src, v.nodes[src].addr, id, v.nodes[id].addr);
-    }
-  }
-  pause_purge(ctl, false);
-  // A write it missed during the copy may come after the copy of its key.
-  if (rc == 0 && cluster_take_missed_write(ctl->c, id)) {
-    rc = -1;
-  }
-  return rc;
+  return ctl_anti_entropy(ctl, id);
 }
 
 void ctl_heal(controller *ctl, int id, node_state state) {
@@ -345,64 +547,13 @@ static void adopt_nodes(controller *ctl, const driver_node *live, int n_live) {
   }
 }
 
-typedef struct {
-  const cluster_view *v;
-  int src;
-} spread;
-
-static int spread_page(void *arg, const node_row *rows, size_t n) {
-  const spread *s = arg;
-  static node_row batch[BATCH_ROWS];
-  for (int dst = 1; dst <= CLUSTER_MAX_NODES; dst++) {
-    if (dst == s->src || !s->v->nodes[dst].exists ||
-        !node_serves_reads(s->v->nodes[dst].sm.state)) {
-      continue;
-    }
-    size_t count = 0;
-    for (size_t i = 0; i != n; i++) {
-      if (ring_has(s->v->ring, dst, rows[i].key, rows[i].key_len)) {
-        batch[count++] = rows[i];
-      }
-      if (count == BATCH_ROWS || (count != 0 && i + 1 == n)) {
-        if (node_put_rows(s->v->nodes[dst].addr, batch, count) != 0) {
-          return -1;
-        }
-        count = 0;
-      }
-    }
-  }
-  return 0;
-}
-
-/**
- * A cp that crashed during a write leaves it on some replicas only. Send every row to the other
- * replicas of its key; the newest version wins, so the replicas agree again.
- */
-static void reconcile(controller *ctl) {
-  LOGF(ctl, LOG_INFO, "start: the last cp did not stop cleanly, reconciling replicas");
-  pause_purge(ctl, true);
-  static cluster_view v;
-  cluster_snapshot(ctl->c, &v);
-  for (int src = 1; src <= CLUSTER_MAX_NODES; src++) {
-    spread s = {&v, src};
-    if (v.nodes[src].exists && node_serves_reads(v.nodes[src].sm.state) &&
-        (node_flush(v.nodes[src].addr) != 0 ||
-         node_dump(v.nodes[src].addr, spread_page, &s) != 0)) {
-      LOGF(ctl, LOG_WARN, "start: reconcile from node %d failed", src);
-    }
-  }
-  pause_purge(ctl, false);
-}
-
 int controller_start_up(controller *ctl) {
   static stored_node stored[CLUSTER_MAX_NODES];
   static driver_node live[CLUSTER_MAX_NODES];
   int n = cp_store_nodes(ctl->store, stored, CLUSTER_MAX_NODES);
   int n_live = driver_list(live, CLUSTER_MAX_NODES);
   stored_migration mig;
-  bool crashed = false;
-  if (n < 0 || n_live < 0 || cp_store_migration(ctl->store, &mig) != 0 ||
-      cp_store_running(ctl->store, &crashed) != 0 || cp_store_put_running(ctl->store, true) != 0) {
+  if (n < 0 || n_live < 0 || cp_store_migration(ctl->store, &mig) != 0) {
     (void)fprintf(stderr, "cp: could not read the state store or the node list\n");
     return -1;
   }
@@ -421,9 +572,5 @@ int controller_start_up(controller *ctl) {
   }
   restart_migration(ctl, mig);
   cluster_reserve_versions(ctl->c);
-  if (crashed) {
-    reconcile(ctl);
-  }
-  ctl->up = true;
   return 0;
 }
