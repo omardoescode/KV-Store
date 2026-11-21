@@ -280,6 +280,21 @@ class FailureTest(ClusterTest):
         finally:
             os.kill(pid, signal.SIGCONT)
 
+    def test_anti_entropy_gives_every_replica_the_winner_of_concurrent_writes(self):
+        c = self.cluster(KV_CP_INITIAL_NODES=3, KV_CP_REPLICAS=3, KV_CP_READ_QUORUM=2,
+                         KV_CP_WRITE_QUORUM=2).start(wait_nodes=3)
+        # Coordinators 1 and 2 wrote k concurrently; each version reached one replica only.
+        from_1 = {'key': 'k', 'value': 'from-1', 'clock': '1:1:1700000002000',
+                  'ts': 1700000002000, 'coord': 1, 'deleted': False}
+        from_2 = {'key': 'k', 'value': 'from-2', 'clock': '2:1:1700000001000',
+                  'ts': 1700000001000, 'coord': 2, 'deleted': False}
+        self.assertEqual(c.node_req(1, 'POST', '/_internal/batch', {'items': [from_1]})[0], 200)
+        self.assertEqual(c.node_req(2, 'POST', '/_internal/batch', {'items': [from_2]})[0], 200)
+        winner = ('from-1', ('1:1:1700000002000,2:1:1700000001000', 1700000002000, 1), False)
+        wait_for(lambda: all(c.dump(n).get('k') == winner for n in (1, 2, 3)), 20,
+                 'the winner on every replica')
+        self.assertEqual(c.get('k'), 'from-1')
+
     def test_write_needs_only_w_live_replicas_when_r_is_larger(self):
         c = self.cluster(KV_CP_INITIAL_NODES=3, KV_CP_REPLICAS=3, KV_CP_READ_QUORUM=3,
                          KV_CP_WRITE_QUORUM=2, KV_CP_FORWARD_TIMEOUT_MS=300,
