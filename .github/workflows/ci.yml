@@ -25,15 +25,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-format-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} g++ cmake pkg-config libssl-dev zlib1g-dev libsqlite3-dev sqlite3 valgrind
 
+      # The key is the h2o commit and its build recipe in the Makefile, not the whole Makefile.
       - name: h2o commit
         id: h2o
-        run: echo "sha=$(git rev-parse HEAD:third_party/h2o)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$(git rev-parse HEAD:third_party/h2o)" >> "$GITHUB_OUTPUT"
+          echo "recipe=$(sed -n '/^\$(H2O_LIB):/,/^$/p' Makefile | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v6
         id: h2o-cache
         with:
           path: build/h2o
-          key: h2o-${{ runner.os }}-${{ steps.h2o.outputs.sha }}-${{ hashFiles('Makefile') }}
+          key: h2o-${{ runner.os }}-${{ steps.h2o.outputs.sha }}-${{ steps.h2o.outputs.recipe }}
 
       # The checkout makes h2o's CMakeLists.txt newer than the cached library, so make would build it again.
       - name: Keep cached h2o
@@ -72,15 +75,18 @@ jobs:
           pkgs="g++ cmake pkg-config libssl-dev zlib1g-dev libsqlite3-dev sqlite3 curl"
           dpkg -s $pkgs >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y $pkgs; }
 
+      # The key is the h2o commit and its build recipe in the Makefile, not the whole Makefile.
       - name: h2o commit
         id: h2o
-        run: echo "sha=$(git rev-parse HEAD:third_party/h2o)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "sha=$(git rev-parse HEAD:third_party/h2o)" >> "$GITHUB_OUTPUT"
+          echo "recipe=$(sed -n '/^\$(H2O_LIB):/,/^$/p' Makefile | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v6
         id: h2o-cache
         with:
           path: build/h2o
-          key: h2o-${{ runner.os }}-${{ steps.h2o.outputs.sha }}-${{ hashFiles('Makefile') }}
+          key: h2o-${{ runner.os }}-${{ steps.h2o.outputs.sha }}-${{ steps.h2o.outputs.recipe }}
 
       # The checkout makes h2o's CMakeLists.txt newer than the cached library, so make would build it again.
       - name: Keep cached h2o
