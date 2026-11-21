@@ -94,11 +94,6 @@ int cluster_plan_read(cluster *c, const char *key, size_t key_len, plan *out);
 void cluster_done(cluster *c, uint64_t epoch);
 /** Note a failed forward to node id; join_target: it was the double-write to the target. */
 void cluster_forward_failed(cluster *c, int id, bool join_target);
-/**
- * A write was acked without replica id: it stops serving reads until a repair. The next
- * cluster_node_event of id writes the change to the store.
- */
-void cluster_missed_write(cluster *c, int id);
 
 /** POST /_cp/nodes: ask the controller for one more node. False at KV_CP_MAX_NODES. */
 bool cluster_request_add(cluster *c);
@@ -123,8 +118,7 @@ unsigned cluster_node_event(cluster *c, int id, node_event ev);
 unsigned cluster_spawned(cluster *c, int id, const char *addr);
 /** Return and clear whether a forward to node id failed since the last call. */
 bool cluster_take_forward_error(cluster *c, int id);
-/** Return and clear whether node id missed a write since the last call. */
-bool cluster_take_missed_write(cluster *c, int id);
+
 /** Move the stored version mark ahead when the versions in use come near it. */
 void cluster_reserve_versions(cluster *c);
 

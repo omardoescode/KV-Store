@@ -26,8 +26,6 @@ typedef enum {
   NODE_EV_RESPAWN,
   NODE_EV_REPAIR_DONE,
   NODE_EV_REPAIR_FAIL,
-  /** A write was acked without this replica: it must not serve reads before a repair. */
-  NODE_EV_MISSED_WRITE,
   NODE_EVENT_COUNT,
 } node_event;
 

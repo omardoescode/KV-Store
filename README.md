@@ -48,7 +48,7 @@ Full system (control plane on port 7890; it spawns storage nodes as containers t
 docker compose up --build
 ```
 
-`compose.yaml` builds `Dockerfile.control` (image `kv-control`) and `Dockerfile.storage` (image `kv-storage`), and starts only cp. cp creates `kv-node-<id>` containers with volumes `kv-data-<id>` on network `kv-net`. Set `KV_CP_INITIAL_NODES`, `KV_CP_MAX_NODES`, `KV_CP_REPLICAS`, `KV_CP_SCALE_RPS` and `KV_SYNC_ACK` in the shell or `.env` (see `.env.cp.example`). `docker compose down` stops cp only; the node containers keep running and cp adopts them on its next start.
+`compose.yaml` builds `Dockerfile.control` (image `kv-control`) and `Dockerfile.storage` (image `kv-storage`), and starts only cp. cp creates `kv-node-<id>` containers with volumes `kv-data-<id>` on network `kv-net`. Set `KV_CP_INITIAL_NODES`, `KV_CP_MAX_NODES`, `KV_CP_REPLICAS` (N), `KV_CP_READ_QUORUM` (R), `KV_CP_WRITE_QUORUM` (W), `KV_CP_SCALE_RPS` and `KV_SYNC_ACK` in the shell or `.env` (see `.env.cp.example`). `docker compose down` stops cp only; the node containers keep running and cp adopts them on its next start.
 
 One storage node without cp:
 
