@@ -9,6 +9,7 @@
 
 #include "cp/fwd.h"
 #include "vclock/vclock.h"
+#include "vclock/vstamp_json.h"
 #include "json/json.h"
 
 enum { KEYS_BUCKETS = 4096 };
@@ -320,17 +321,13 @@ static void read_done(op *o) {
 static int take_answer(op *o, size_t i, const char *body, size_t len) {
   json_doc *doc = json_parse(body, len);
   const json_val *root = json_doc_root(doc);
-  size_t clock_len = 0;
-  const char *clock = json_str(json_get(root, "clock"), &clock_len);
   size_t value_len = 0;
   const char *value = json_str(json_get(root, "value"), &value_len);
   vstamp *s = &o->stamps[i];
-  if (!clock || !value || vclock_decode(clock, clock_len, &s->clock) != 0) {
+  if (!value || !vstamp_from_json(root, s)) {
     json_doc_free(doc);
     return -1;
   }
-  s->ts = (uint64_t)json_int(json_get(root, "ts"));
-  s->coord = (int)json_int(json_get(root, "coord"));
   bool deleted = json_bool(json_get(root, "deleted"));
   int pick = 1;
   if (o->found) {

@@ -1,6 +1,7 @@
 #include "kv_handlers.h"
 #include "kv_store.h"
 #include "vclock/vclock.h"
+#include "vclock/vstamp_json.h"
 #include "json/json.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -306,12 +307,8 @@ typedef struct {
 /** Add "value", "clock", "ts", "coord" and "deleted" of an entry to obj. Returns false on error. */
 static bool put_entry(json_builder *b, json_node *obj, const void *value, size_t value_len,
                       const vstamp *stamp, bool deleted) {
-  char clock[VCLOCK_TEXT_MAX];
-  size_t clock_len = vclock_encode(&stamp->clock, clock);
   return (bool)(json_put(b, obj, "value", json_new_str(b, value ? value : "", value_len)) &&
-                json_put(b, obj, "clock", json_new_str(b, clock, clock_len)) &&
-                json_put(b, obj, "ts", json_new_int(b, (int64_t)stamp->ts)) &&
-                json_put(b, obj, "coord", json_new_int(b, stamp->coord)) &&
+                vstamp_to_json(b, obj, stamp) &&
                 json_put(b, obj, "deleted", json_new_bool(b, deleted)));
 }
 
@@ -477,22 +474,6 @@ static const json_val *body_array(const json_doc *doc, const char *name) {
   return json_type_of(arr) == JSON_ARRAY ? arr : NULL;
 }
 
-/** Read the "clock", "ts" and "coord" of a batch item into *stamp. Returns false if malformed. */
-static bool item_stamp(const json_val *item, vstamp *stamp) {
-  size_t clock_len = 0;
-  const char *clock = json_str(json_get(item, "clock"), &clock_len);
-  const json_val *ts = json_get(item, "ts");
-  const json_val *coord = json_get(item, "coord");
-  if (!clock || vclock_decode(clock, clock_len, &stamp->clock) != 0 ||
-      json_type_of(ts) != JSON_NUMBER || json_int(ts) < 0 || json_type_of(coord) != JSON_NUMBER ||
-      json_int(coord) < 0 || json_int(coord) > INT32_MAX) {
-    return false;
-  }
-  stamp->ts = (uint64_t)json_int(ts);
-  stamp->coord = (int)json_int(coord);
-  return true;
-}
-
 /**
  * POST /_internal/batch {"items":[{key,value,clock,ts,coord,deleted}]}: puts and tombstones, each
  * applied by the winner rule. All items are checked before any is applied.
@@ -509,7 +490,8 @@ static void batch_handler(http_response *response, const http_request *request, 
     size_t key_len = 0;
     const char *key = json_str(json_get(item, "key"), &key_len);
     ok = (bool)(key && valid_key(key, key_len) &&
-                json_type_of(json_get(item, "value")) == JSON_STRING && item_stamp(item, &stamp) &&
+                json_type_of(json_get(item, "value")) == JSON_STRING &&
+                vstamp_from_json(item, &stamp) &&
                 json_type_of(json_get(item, "deleted")) == JSON_BOOL);
   }
   if (!ok) {
@@ -525,7 +507,7 @@ static void batch_handler(http_response *response, const http_request *request, 
     const char *key = json_str(json_get(item, "key"), NULL);
     size_t value_len = 0;
     const char *value = json_str(json_get(item, "value"), &value_len);
-    (void)item_stamp(item, &stamp);
+    (void)vstamp_from_json(item, &stamp);
     rc = json_bool(json_get(item, "deleted")) ? kv_store_del(store, key, &stamp)
                                               : kv_store_put(store, key, value, value_len, &stamp);
   }

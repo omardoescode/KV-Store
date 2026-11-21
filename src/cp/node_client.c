@@ -7,6 +7,7 @@
 
 #include "cp/hclient.h"
 #include "http/http.h"
+#include "vclock/vstamp_json.h"
 #include "json/json.h"
 
 enum { DUMP_PAGE = 1000 };
@@ -85,12 +86,8 @@ static int fetch_rows(const char *addr, node_page_fn fn, void *arg, const char *
     if (!r->value) {
       r->value = "";
     }
-    size_t clock_len = 0;
-    const char *clock = json_str(json_get(row, "clock"), &clock_len);
-    r->stamp.ts = (uint64_t)json_int(json_get(row, "ts"));
-    r->stamp.coord = (int)json_int(json_get(row, "coord"));
     r->deleted = json_bool(json_get(row, "deleted"));
-    if (!clock || vclock_decode(clock, clock_len, &r->stamp.clock) != 0) {
+    if (!vstamp_from_json(row, &r->stamp)) {
       r->key = NULL;
     }
     count += r->key ? 1 : 0;
@@ -187,13 +184,9 @@ int node_put_rows(const char *addr, const node_row *rows, size_t n) {
   for (size_t i = 0; ok && i != n; i++) {
     const node_row *r = &rows[i];
     json_node *item = json_new_obj(b);
-    char clock[VCLOCK_TEXT_MAX];
-    size_t clock_len = vclock_encode(&r->stamp.clock, clock);
     ok = (bool)(json_put(b, item, "key", json_new_str(b, r->key, r->key_len)) &&
                 json_put(b, item, "value", json_new_str(b, r->value, r->value_len)) &&
-                json_put(b, item, "clock", json_new_str(b, clock, clock_len)) &&
-                json_put(b, item, "ts", json_new_int(b, (int64_t)r->stamp.ts)) &&
-                json_put(b, item, "coord", json_new_int(b, r->stamp.coord)) &&
+                vstamp_to_json(b, item, &r->stamp) &&
                 json_put(b, item, "deleted", json_new_bool(b, r->deleted)) &&
                 json_push(items, item));
   }
