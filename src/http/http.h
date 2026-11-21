@@ -88,6 +88,15 @@ int http_default_threads(void);
 int http_listen_and_serve(http_server *s, const char *addr, int threads);
 
 /**
+ * Percent-encode s into out, which has room for len * 3 bytes; unreserved characters stay. Returns
+ * the length written, without a terminator.
+ */
+size_t http_percent_encode(char *out, const char *s, size_t len);
+
+/** Run fn on each worker thread when its loop stops, while the loop still exists. */
+void http_on_worker_exit(http_server *s, void (*fn)(void));
+
+/**
  * Make http_listen_and_serve stop accepting connections, wait up to 5 s for open requests to
  * finish, and return 0. Async-signal-safe; any thread, also before the server starts.
  */
@@ -102,6 +111,11 @@ http_str http_req_path(const http_request *r);
  * The value is percent-decoded, borrowed, and valid until the handler returns.
  */
 http_str http_req_param(const http_request *r, http_str name);
+/**
+ * Return the percent-decoded value of the first query parameter name, "" for "name" with no '=',
+ * or {NULL, 0} if absent or its escape is invalid. Borrowed, valid until the handler returns.
+ */
+http_str http_req_query(const http_request *r, http_str name);
 /** Return the borrowed request body, valid until the handler returns. */
 http_str http_req_body(const http_request *r);
 /**
@@ -119,5 +133,36 @@ void http_set_header(http_response *w, http_str name, http_str value);
 int http_resp_status(const http_response *w);
 /** Send status and len bytes of body as the final response; call once per request. */
 void http_write(http_response *w, int status, const void *body, size_t len);
+
+typedef struct http_deferred http_deferred;
+
+typedef struct {
+  http_str name;
+  http_str value;
+} http_header;
+
+/**
+ * Take over the response of w, so the handler may return without http_write; respond later with
+ * http_resume, once. Middleware that runs after the handler sees status 0.
+ */
+http_deferred *http_defer(http_response *w);
+
+/**
+ * Send the response of d and free d; call once, from any thread. Copies headers (lowercase
+ * names) and body. If the client is gone, only frees d.
+ */
+void http_resume(http_deferred *d, int status, const http_header *headers, size_t header_count,
+                 const void *body, size_t len);
+
+/**
+ * Run fn(arg) on the event loop thread of d's request: at once if called there, else queued.
+ * Runs also if the client is gone. d stays valid until http_resume.
+ */
+void http_deferred_post(http_deferred *d, void (*fn)(void *arg), void *arg);
+
+struct st_h2o_evloop_t;
+
+/** Return the H2O event loop of the calling event loop thread, or NULL on other threads. */
+struct st_h2o_evloop_t *http_current_loop(void);
 
 #endif

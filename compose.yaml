@@ -1,0 +1,43 @@
+# The full system: `docker compose up --build`. Only cp runs from here; cp spawns the storage
+# nodes (kv-node-<id>, volume kv-data-<id>) on network kv-net. Nodes publish no host ports.
+services:
+  cp:
+    build:
+      context: .
+      dockerfile: Dockerfile.control
+    image: kv-control
+    ports:
+      - "7890:7890"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - kv-cp-data:/data
+    networks:
+      - kv-net
+    restart: unless-stopped
+    environment:
+      KV_CP_INITIAL_NODES: ${KV_CP_INITIAL_NODES:-3}
+      KV_CP_MAX_NODES: ${KV_CP_MAX_NODES:-3}
+      KV_CP_REPLICAS: ${KV_CP_REPLICAS:-3}
+      KV_CP_READ_QUORUM: ${KV_CP_READ_QUORUM:-}
+      KV_CP_WRITE_QUORUM: ${KV_CP_WRITE_QUORUM:-}
+      KV_CP_SCALE_RPS: ${KV_CP_SCALE_RPS:-}
+      KV_SYNC_ACK: ${KV_SYNC_ACK:-0}
+    depends_on:
+      storage-image:
+        condition: service_completed_successfully
+
+  # Builds the kv-storage image that cp spawns; the container exits at once.
+  storage-image:
+    build:
+      context: .
+      dockerfile: Dockerfile.storage
+    image: kv-storage
+    entrypoint: ["true"]
+    restart: "no"
+
+volumes:
+  kv-cp-data:
+
+networks:
+  kv-net:
+    name: kv-net

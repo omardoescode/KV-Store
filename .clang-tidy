@@ -13,3 +13,6 @@ Checks: >
 
 HeaderFilterRegex: 'src/.*'
 FormatStyle: file
+CheckOptions:
+  # Flag only same-type neighbours; int/enum/size_t mixes are too common in C to be useful here.
+  bugprone-easily-swappable-parameters.ModelImplicitConversions: false

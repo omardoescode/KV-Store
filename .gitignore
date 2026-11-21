@@ -78,6 +78,7 @@ in/
 
 # Benchmark results (bench/profile.py)
 results/
+cluster-results/
 
 # Python
 __pycache__/

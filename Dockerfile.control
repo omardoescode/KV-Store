@@ -1,0 +1,36 @@
+# Control plane (cp) image: the entry point for clients. It spawns storage nodes as containers
+# of KV_CP_NODE_IMAGE through the Docker socket (see compose.yaml).
+# Multi-stage: the first stage compiles, the second has only the runtime libraries.
+
+FROM debian:bookworm AS build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       gcc g++ make cmake pkg-config libssl-dev zlib1g-dev libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY Makefile ./
+COPY third_party ./third_party
+COPY src ./src
+RUN make -j"$(nproc)" build/kv-cp
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libssl3 zlib1g libsqlite3-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir /data
+
+COPY --from=build /src/build/kv-cp /usr/local/bin/kv-cp
+
+ENV KV_CP_LISTEN_ADDR=0.0.0.0:7890 \
+    KV_CP_LOG_PATH=- \
+    KV_CP_DB_PATH=/data/cp.db \
+    KV_CP_NODE_IMAGE=kv-storage
+
+# Root: cp needs the Docker socket, which is root-owned on most hosts.
+VOLUME /data
+EXPOSE 7890
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/usr/local/bin/kv-cp"]
