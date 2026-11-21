@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cp/ring.h"
+
 // sizeof(sockaddr_un.sun_path) on Linux, with its NUL.
 enum { SUN_PATH_LEN = 108 };
 
@@ -165,14 +167,13 @@ int cp_config_load(cp_config *cfg) {
       env_range("KV_CP_MAX_NODES", &max_nodes, 1, 1024) != 0) {
     return -1;
   }
-  // 16 = RING_MAX_REPLICAS: the ring keeps at most 16 replicas of a key.
-  if (env_range("KV_CP_REPLICAS", &replicas, 1, 16) != 0) {
+  if (env_range("KV_CP_REPLICAS", &replicas, 1, RING_MAX_REPLICAS) != 0) {
     return -1;
   }
   long read_quorum = (replicas / 2) + 1;
   long write_quorum = read_quorum;
-  if (env_range("KV_CP_READ_QUORUM", &read_quorum, 1, 16) != 0 ||
-      env_range("KV_CP_WRITE_QUORUM", &write_quorum, 1, 16) != 0 ||
+  if (env_range("KV_CP_READ_QUORUM", &read_quorum, 1, RING_MAX_REPLICAS) != 0 ||
+      env_range("KV_CP_WRITE_QUORUM", &write_quorum, 1, RING_MAX_REPLICAS) != 0 ||
       env_range("KV_CP_VNODES", &vnodes, 1, 4096) != 0 ||
       env_range("KV_CP_SCALE_RPS", &scale_rps, 0, 1000000000) != 0 ||
       env_range("KV_CP_SCALE_WINDOW_S", &window_s, 1, 3600) != 0 ||
