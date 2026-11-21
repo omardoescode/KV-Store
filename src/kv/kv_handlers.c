@@ -397,25 +397,38 @@ static void dump_handler(http_response *response, const http_request *request, v
 }
 
 /**
- * POST /_internal/digest {"ends":[int]}: ring positions in increasing order, each a uint64 sent as
- * the int64 of the same bits. Responds {"hashes":[int]}: the digest of each segment, see
- * kv_store_digest.
+ * Return a malloc'd copy of the "ends" of the JSON object root, ring positions in increasing
+ * order, each a uint64 sent as the int64 of the same bits, with room for as many uint64 after
+ * them; set *n to their count. Returns NULL if malformed.
  */
-static void digest_handler(http_response *response, const http_request *request, void *arg) {
-  http_str body = http_req_body(request);
-  json_doc *doc = json_parse(body.ptr, body.len);
-  const json_val *ends = json_get(json_doc_root(doc), "ends");
-  size_t n = json_len(ends);
-  uint64_t *pos = json_type_of(ends) == JSON_ARRAY ? calloc(n ? n : 1, 2 * sizeof(*pos)) : NULL;
+static uint64_t *parse_ends(const json_val *root, size_t *n) {
+  const json_val *ends = json_get(root, "ends");
+  *n = json_len(ends);
+  uint64_t *pos = json_type_of(ends) == JSON_ARRAY ? calloc(*n ? *n : 1, 2 * sizeof(*pos)) : NULL;
   bool ok = pos != NULL;
-  for (size_t i = 0; ok && i != n; i++) {
+  for (size_t i = 0; ok && i != *n; i++) {
     const json_val *v = json_at(ends, i);
     pos[i] = (uint64_t)json_int(v);
     ok = (bool)(json_type_of(v) == JSON_NUMBER && (i == 0 || pos[i] > pos[i - 1]));
   }
-  json_doc_free(doc);
   if (!ok) {
     free(pos);
+    return NULL;
+  }
+  return pos;
+}
+
+/**
+ * POST /_internal/digest {"ends":[int]}: see parse_ends. Responds {"hashes":[int]}: the digest of
+ * each segment, see kv_store_digest.
+ */
+static void digest_handler(http_response *response, const http_request *request, void *arg) {
+  http_str body = http_req_body(request);
+  json_doc *doc = json_parse(body.ptr, body.len);
+  size_t n = 0;
+  uint64_t *pos = parse_ends(json_doc_root(doc), &n);
+  json_doc_free(doc);
+  if (!pos) {
     write_message(response, 400, "want {\"ends\":[int64]} in increasing uint64 order\n");
     return;
   }
@@ -423,13 +436,44 @@ static void digest_handler(http_response *response, const http_request *request,
   json_builder *b = json_builder_new();
   json_node *root = json_new_obj(b);
   json_node *arr = json_new_arr(b);
-  ok = (bool)(kv_store_digest(arg, pos, n, hashes) == 0 && json_put(b, root, "hashes", arr));
+  bool ok = (bool)(kv_store_digest(arg, pos, n, hashes) == 0 && json_put(b, root, "hashes", arr));
   for (size_t i = 0; ok && i != n; i++) {
     ok = json_push(arr, json_new_int(b, (int64_t)hashes[i]));
   }
   write_json(response, ok ? root : NULL);
   json_builder_free(b);
   free(pos);
+}
+
+/**
+ * POST /_internal/purge {"ends":[int],"purge":[bool]}: remove the tombstones past the TTL in each
+ * segment i with purge[i] (see parse_ends and kv_store_purge). Responds {"purged":int}.
+ */
+static void purge_handler(http_response *response, const http_request *request, void *arg) {
+  http_str body = http_req_body(request);
+  json_doc *doc = json_parse(body.ptr, body.len);
+  size_t n = 0;
+  uint64_t *pos = parse_ends(json_doc_root(doc), &n);
+  const json_val *flags = json_get(json_doc_root(doc), "purge");
+  bool *purge = pos ? (bool *)(pos + n) : NULL;
+  bool ok = (bool)(pos && json_type_of(flags) == JSON_ARRAY && json_len(flags) == n);
+  for (size_t i = 0; ok && i != n; i++) {
+    ok = json_type_of(json_at(flags, i)) == JSON_BOOL;
+    purge[i] = (bool)(ok && json_bool(json_at(flags, i)));
+  }
+  json_doc_free(doc);
+  if (!ok) {
+    free(pos);
+    write_message(response, 400, "want {\"ends\":[int64],\"purge\":[bool]} of one length\n");
+    return;
+  }
+  int purged = kv_store_purge(arg, pos, purge, n);
+  free(pos);
+  json_builder *b = json_builder_new();
+  json_node *root = json_new_obj(b);
+  ok = (bool)(purged >= 0 && json_put(b, root, "purged", json_new_int(b, purged)));
+  write_json(response, ok ? root : NULL);
+  json_builder_free(b);
 }
 
 /** Set *out from query parameter name, a decimal uint64. Returns false if absent or malformed. */
@@ -538,22 +582,6 @@ static void delete_batch_handler(http_response *response, const http_request *re
   }
   json_doc_free(doc);
   http_write(response, status_of(rc), NULL, 0);
-}
-
-/** POST /_internal/purge {"paused":bool}: pause or resume the tombstone purge. */
-static void purge_handler(http_response *response, const http_request *request, void *arg) {
-  kv_store *store = arg;
-  http_str body = http_req_body(request);
-  json_doc *doc = json_parse(body.ptr, body.len);
-  const json_val *paused = json_get(json_doc_root(doc), "paused");
-  if (json_type_of(paused) != JSON_BOOL) {
-    json_doc_free(doc);
-    write_message(response, 400, "want {\"paused\":bool}\n");
-    return;
-  }
-  kv_store_pause_purge(store, json_bool(paused));
-  json_doc_free(doc);
-  http_write(response, 200, NULL, 0);
 }
 
 void kv_register_routes(http_server *server, kv_store *store, logger *log, bool sync_ack) {

@@ -172,6 +172,37 @@ static void test_tombstone_carries_its_clock(const char *db) {
   printf("  test_tombstone_carries_its_clock OK\n");
 }
 
+static void test_purge_removes_tombstones_past_the_ttl_in_the_named_segments(const char *db) {
+  kv_store *store = open_store(db, 10, 1000000);
+  assert(store);
+  struct timespec now;
+  clock_gettime(CLOCK_REALTIME, &now);
+  uint64_t now_ms = ((uint64_t)now.tv_sec * 1000) + ((uint64_t)now.tv_nsec / 1000000);
+  vstamp old = stamp("1:1:0", 1U << 16U, 1);
+  vstamp old_del = stamp("1:2:0", 2U << 16U, 1);
+  vstamp young_del = stamp("1:2:0", now_ms << 16U, 1);
+  assert(kv_store_put(store, "live", "v", 1, &old) == 0);
+  assert(kv_store_put(store, "old", "v", 1, &old) == 0);
+  assert(kv_store_del(store, "old", &old_del) == 1);
+  assert(kv_store_put(store, "young", "v", 1, &old) == 0);
+  assert(kv_store_del(store, "young", &young_del) == 1);
+  uint64_t ends[] = {UINT64_MAX};
+  assert(kv_store_purge(store, ends, (bool[]){false}, 1) == 0);
+  expect_record(store, "old", NULL, "1:2:0", 2U << 16U, 1);
+  assert(kv_store_purge(store, ends, (bool[]){true}, 1) == 1);
+  kv_record r;
+  assert(kv_store_read(store, "old", &r) == 0);
+  expect_record(store, "young", NULL, "1:2:0", now_ms << 16U, 1);
+  expect_value(store, "live", "v", 1);
+  assert(kv_store_free(store) == 0);
+  store = open_store(db, 10, 1000000);
+  assert(store);
+  assert(kv_store_read(store, "old", &r) == 0);
+  expect_record(store, "young", NULL, "1:2:0", now_ms << 16U, 1);
+  assert(kv_store_free(store) == 0);
+  printf("  test_purge_removes_tombstones_past_the_ttl_in_the_named_segments OK\n");
+}
+
 static void test_version_column_becomes_the_timestamp_of_an_empty_clock(const char *db) {
   sqlite3 *old = NULL;
   assert(sqlite3_open(db, &old) == SQLITE_OK);
@@ -355,6 +386,9 @@ int main(void) {
   test_concurrent_puts_keep_the_winner_with_the_merged_clock(db);
   test_a_full_tie_keeps_the_same_value_in_either_order(db);
   test_tombstone_carries_its_clock(db);
+  char purge_db[sizeof(dir) + 16];
+  (void)snprintf(purge_db, sizeof(purge_db), "%s/purge.db", dir);
+  test_purge_removes_tombstones_past_the_ttl_in_the_named_segments(purge_db);
   char old_db[sizeof(dir) + 16];
   (void)snprintf(old_db, sizeof(old_db), "%s/old.db", dir);
   test_version_column_becomes_the_timestamp_of_an_empty_clock(old_db);
@@ -362,7 +396,7 @@ int main(void) {
 
   char path[sizeof(db) + 8];
   static const char *const suffixes[] = {"", "-wal", "-shm"};
-  const char *const dbs[] = {db, bad_db, old_db};
+  const char *const dbs[] = {db, bad_db, purge_db, old_db};
   for (size_t d = 0; d != sizeof(dbs) / sizeof(dbs[0]); d++) {
     for (size_t i = 0; i != sizeof(suffixes) / sizeof(suffixes[0]); i++) {
       (void)snprintf(path, sizeof(path), "%s%s", dbs[d], suffixes[i]);

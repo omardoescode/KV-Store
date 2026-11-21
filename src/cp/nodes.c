@@ -91,19 +91,6 @@ static int move_rows(controller *ctl, const xfer *x, int node, const char *addr,
   return node_dump(addr, move_page, &m);
 }
 
-static bool is_live(node_state s) { return (bool)(node_takes_writes(s) || s == NODE_SYNCING); }
-
-/** Pause or resume the tombstone purge on every live node. */
-static void pause_purge(controller *ctl, bool paused) {
-  static cluster_view v;
-  cluster_snapshot(ctl->c, &v);
-  for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
-    if (v.nodes[id].exists && is_live(v.nodes[id].sm.state)) {
-      (void)node_pause_purge(v.nodes[id].addr, paused);
-    }
-  }
-}
-
 /** One entry of a replica, copied out of a page. */
 typedef struct {
   char *key;
@@ -112,15 +99,16 @@ typedef struct {
   size_t value_len;
   vstamp stamp;
   bool deleted;
-  /** Index of the replica in the segment's list. */
-  size_t src;
+  /** Index of the replica in ae_out.ids. */
+  size_t replica;
 } ae_row;
 
 typedef struct {
   ae_row *rows;
   size_t n;
   size_t cap;
-  size_t src;
+  /** Index of the replica whose rows come next. */
+  size_t replica;
 } ae_rows;
 
 static int collect(void *arg, const node_row *rows, size_t n) {
@@ -148,7 +136,7 @@ static int collect(void *arg, const node_row *rows, size_t n) {
     out->value_len = r->value_len;
     out->stamp = r->stamp;
     out->deleted = r->deleted;
-    out->src = a->src;
+    out->replica = a->replica;
     a->n++;
   }
   return 0;
@@ -165,12 +153,11 @@ static int by_key(const void *lhs, const void *rhs) {
   return (a->key_len > b->key_len) - (a->key_len < b->key_len);
 }
 
-/** The replicas of one segment and the rows to send each. */
+/** The home replicas of one segment that answered, and the rows to send each. */
 typedef struct {
   const cluster_view *v;
-  const int *ids;
-  size_t m;
-  bool to_missing;
+  int ids[RING_MAX_REPLICAS];
+  size_t count;
   node_row queues[RING_MAX_REPLICAS][AE_BATCH];
   size_t lens[RING_MAX_REPLICAS];
 } ae_out;
@@ -185,9 +172,8 @@ static int flush_queue(ae_out *out, size_t j) {
 }
 
 /**
- * Queue the winner of the key rows[0..n) to every replica without it. A tombstone goes to a
- * replica without the key only when out->to_missing (a repair): else a purged tombstone would
- * come back. Returns 0 or -1.
+ * Queue the winner of the key rows[0..n) to every replica without it, a tombstone too: no
+ * replica purges it before every home replica holds it. Returns 0 or -1.
  */
 static int send_winner(ae_out *out, const ae_row *rows, size_t n) {
   size_t win = 0;
@@ -197,16 +183,14 @@ static int send_winner(ae_out *out, const ae_row *rows, size_t n) {
     win = vstamp_pick(&merged, &rows[k].stamp, &next) == 1 ? k : win;
     merged = next;
   }
-  bool has[RING_MAX_REPLICAS] = {false};
   bool fresh[RING_MAX_REPLICAS] = {false};
   for (size_t k = 0; k != n; k++) {
-    has[rows[k].src] = true;
-    fresh[rows[k].src] = vstamp_same(&rows[k].stamp, &merged);
+    fresh[rows[k].replica] = vstamp_same(&rows[k].stamp, &merged);
   }
   const ae_row *w = &rows[win];
   node_row row = {w->key, w->key_len, w->value, w->value_len, merged, w->deleted};
-  for (size_t j = 0; j != out->m; j++) {
-    if (!fresh[j] && (has[j] || !w->deleted || out->to_missing)) {
+  for (size_t j = 0; j != out->count; j++) {
+    if (!fresh[j]) {
       out->queues[j][out->lens[j]++] = row;
       if (out->lens[j] == AE_BATCH && flush_queue(out, j) != 0) {
         return -1;
@@ -220,8 +204,8 @@ static int send_winner(ae_out *out, const ae_row *rows, size_t n) {
 static int sync_segment(ae_out *out, ring_range r) {
   ae_rows all = {0};
   int rc = 0;
-  for (size_t j = 0; j != out->m && rc == 0; j++) {
-    all.src = j;
+  for (size_t j = 0; j != out->count && rc == 0; j++) {
+    all.replica = j;
     rc = node_range(out->v->nodes[out->ids[j]].addr, r.start, r.end, collect, &all);
   }
   if (all.n) {
@@ -233,7 +217,7 @@ static int sync_segment(ae_out *out, ring_range r) {
     rc = send_winner(out, &all.rows[g], next - g);
   }
   // Queued rows point into all.rows: send them before those are freed.
-  for (size_t j = 0; j != out->m; j++) {
+  for (size_t j = 0; j != out->count; j++) {
     rc = flush_queue(out, j) != 0 ? -1 : rc;
   }
   for (size_t i = 0; i != all.n; i++) {
@@ -262,7 +246,42 @@ static void take_digests(const cluster_view *v, const uint64_t *ends, size_t n,
   }
 }
 
-int ctl_anti_entropy(controller *ctl, int repair) {
+/**
+ * Set the replicas of out to those of the n_prefs home replicas of segment i that gave a digest,
+ * and *differ to whether their digests differ. Returns whether node (0: any) is one of them.
+ */
+static bool take_replicas(ae_out *out, const int *prefs, size_t n_prefs, uint64_t *const *digests,
+                          size_t i, int node, bool *differ) {
+  out->count = 0;
+  bool has_node = node == 0;
+  for (size_t j = 0; j != n_prefs; j++) {
+    const uint64_t *d = digests[prefs[j]];
+    if (d) {
+      *differ = (bool)(*differ || (out->count != 0 && d[i] != digests[out->ids[0]][i]));
+      has_node = (bool)(has_node || prefs[j] == node);
+      out->ids[out->count++] = prefs[j];
+    }
+  }
+  return has_node;
+}
+
+/** Purge the tombstones of the segments i with purge[i] on every node that gave a digest. */
+static void purge_agreed(const cluster_view *v, const uint64_t *ends, const bool *purge, size_t n,
+                         uint64_t *const *digests) {
+  for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
+    if (digests[id]) {
+      (void)node_purge(v->nodes[id].addr, ends, purge, n);
+    }
+  }
+}
+
+/**
+ * Compare a digest of each ring segment on its live home replicas and copy the winner of each key
+ * that differs to the replicas without it; with a node id, only the segments of that node, which
+ * must answer (0: every segment). Then purge the tombstones of each segment whose home replicas
+ * all answered with one digest, as each of them holds every tombstone there. Returns 0 or -1.
+ */
+static int sync_ring(controller *ctl, int node) {
   static cluster_view v;
   cluster_snapshot(ctl->c, &v);
   size_t n = v.ring ? ring_segments(v.ring) : 0;
@@ -270,7 +289,10 @@ int ctl_anti_entropy(controller *ctl, int repair) {
     return 0;
   }
   uint64_t *ends = malloc(n * sizeof(*ends));
-  if (!ends) {
+  bool *purge = calloc(n, sizeof(*purge));
+  if (!ends || !purge) {
+    free(ends);
+    free(purge);
     return -1;
   }
   for (size_t i = 0; i != n; i++) {
@@ -278,48 +300,47 @@ int ctl_anti_entropy(controller *ctl, int repair) {
   }
   static uint64_t *digests[CLUSTER_MAX_NODES + 1];
   take_digests(&v, ends, n, digests);
-  int rc = repair && !digests[repair] ? -1 : 0;
+  int rc = node && !digests[node] ? -1 : 0;
   static ae_out out;
-  int ids[RING_MAX_REPLICAS];
-  out = (ae_out){.v = &v, .ids = ids, .to_missing = repair != 0};
+  out = (ae_out){.v = &v};
+  bool any_purge = false;
   for (size_t i = 0; rc == 0 && i != n; i++) {
     int prefs[RING_MAX_REPLICAS];
-    size_t np = ring_segment_prefs(v.ring, i, prefs);
-    out.m = 0;
+    size_t n_prefs = ring_segment_prefs(v.ring, i, prefs);
     bool differ = false;
-    bool has_repair = repair == 0;
-    for (size_t j = 0; j != np; j++) {
-      const uint64_t *d = digests[prefs[j]];
-      if (d) {
-        differ = (bool)(differ || (out.m != 0 && d[i] != digests[ids[0]][i]));
-        has_repair = (bool)(has_repair || prefs[j] == repair);
-        ids[out.m++] = prefs[j];
-      }
-    }
-    if (differ && has_repair) {
+    bool has_node = take_replicas(&out, prefs, n_prefs, digests, i, node, &differ);
+    if (differ && has_node) {
       rc = sync_segment(&out, (ring_range){ends[i == 0 ? n - 1 : i - 1], ends[i]});
     }
+    purge[i] = (bool)(!differ && out.count == n_prefs);
+    any_purge = (bool)(any_purge || purge[i]);
+  }
+  if (rc == 0 && any_purge) {
+    purge_agreed(&v, ends, purge, n, digests);
   }
   for (int id = 1; id <= CLUSTER_MAX_NODES; id++) {
     free(digests[id]);
   }
+  free(purge);
   free(ends);
   return rc;
 }
 
+int ctl_anti_entropy(controller *ctl) { return sync_ring(ctl, 0); }
+
 /** Bring node id up to date with anti-entropy against its peers. Returns 0 or -1. */
-static int repair(controller *ctl, int id) {
+static int repair_node(controller *ctl, int id) {
   driver_fault_point("REPAIR", id);
   // Writes that started before the node was REPAIRING did not go to it.
   if (cluster_drain(ctl->c, DRAIN_TIMEOUT_MS) != 0) {
     return -1;
   }
-  return ctl_anti_entropy(ctl, id);
+  return sync_ring(ctl, id);
 }
 
 void ctl_heal(controller *ctl, int id, node_state state) {
   if (state == NODE_REPAIRING) {
-    if (repair(ctl, id) == 0) {
+    if (repair_node(ctl, id) == 0) {
       (void)cluster_node_event(ctl->c, id, NODE_EV_REPAIR_DONE);
     }
     return;
@@ -337,7 +358,7 @@ void ctl_heal(controller *ctl, int id, node_state state) {
   }
   act = cluster_spawned(ctl->c, id, addr);
   while ((act & NODE_ACT_REPAIR) != 0) {
-    if (repair(ctl, id) == 0) {
+    if (repair_node(ctl, id) == 0) {
       (void)cluster_node_event(ctl->c, id, NODE_EV_REPAIR_DONE);
       return;
     }
@@ -359,7 +380,6 @@ static void abort_join(controller *ctl, int target, bool retry) {
   (void)cluster_drain(ctl->c, DRAIN_TIMEOUT_MS);
   (void)driver_stop(target);
   (void)cluster_drop_node(ctl->c, target);
-  pause_purge(ctl, false);
   (void)cluster_set_phase(ctl->c, MIG_IDLE, 0);
   LOGF(ctl, LOG_WARN, "migration: join of node %d aborted", target);
   if (retry) {
@@ -378,7 +398,6 @@ static int copy_phase(controller *ctl, int target) {
   if (cluster_drain(ctl->c, DRAIN_TIMEOUT_MS) != 0) {
     return -1;
   }
-  pause_purge(ctl, true);
   static cluster_view v;
   cluster_snapshot(ctl->c, &v);
   static bool readers[CLUSTER_MAX_NODES + 1];
@@ -416,7 +435,6 @@ static int purge_phase(controller *ctl, int target) {
     }
   }
   if (rc == 0) {
-    pause_purge(ctl, false);
   }
   return rc;
 }

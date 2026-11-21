@@ -57,7 +57,10 @@ int node_put_rows(const char *addr, const node_row *rows, size_t n);
 /** Remove the keys of rows and their tombstones, whatever their clocks. Returns 0 or -1. */
 int node_delete_keys(const char *addr, const node_row *rows, size_t n);
 
-/** Pause or resume the tombstone purge of the node. Returns 0 or -1. */
-int node_pause_purge(const char *addr, bool paused);
+/**
+ * Remove from the node the tombstones past its TTL in the segments i with purge[i], of the n
+ * segments that end at ends (see node_digest). Returns 0 or -1.
+ */
+int node_purge(const char *addr, const uint64_t *ends, const bool *purge, size_t n);
 
 #endif

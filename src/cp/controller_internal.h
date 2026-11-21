@@ -29,10 +29,10 @@ int64_t ctl_mono_ms(void);
 
 /**
  * Anti-entropy: compare a digest of each ring segment on its live home replicas and copy the
- * winner of each key that differs to the replicas without it. With repair (a node id), only the
- * segments of that node, tombstones too; it fails if the node does not answer. Returns 0 or -1.
+ * winner of each key that differs to the replicas without it, tombstones too. Then purge the
+ * tombstones of the segments whose home replicas all agree. Returns 0 or -1.
  */
-int ctl_anti_entropy(controller *ctl, int repair);
+int ctl_anti_entropy(controller *ctl);
 /** Spawn node id, seen DEAD, again with its data and repair it; or repair it, seen REPAIRING. */
 void ctl_heal(controller *ctl, int id, node_state state);
 /** Add one node. asked: POST /_cp/nodes asked for it, so an aborted join asks again. */

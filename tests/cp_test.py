@@ -328,6 +328,25 @@ class FailureTest(ClusterTest):
             entry = json.loads(c.node_req(stale, 'GET', f'/_internal/get?key={key}')[1])
             self.assertEqual(entry['value'], 'new')
 
+    def test_a_replica_down_past_the_tombstone_ttl_does_not_bring_a_deleted_key_back(self):
+        # Node 1 misses the delete and comes back (respawned after 40 failed probes) only after
+        # the TTL; its peers keep the tombstone until it holds it too.
+        c = self.cluster(KV_CP_INITIAL_NODES=3, KV_CP_REPLICAS=3, KV_CP_READ_QUORUM=2,
+                         KV_CP_WRITE_QUORUM=2, KV_TOMBSTONE_TTL_S=1,
+                         KV_CP_PROBE_FAILS=40).start(wait_nodes=3)
+        self.assertEqual(c.put('k', 'v'), 200)
+        wait_for(lambda: all(c.dump(n).get('k', ('',))[0] == 'v' for n in (1, 2, 3)), 10,
+                 'k on every replica')
+        c.kill_node(1)
+        self.assertEqual(c.delete('k'), 200)
+        wait_for(lambda: c.nodes()[1]['state'] != 'ACTIVE', 20, 'node 1 seen dead')
+        c.wait_active(3, 30)
+        self.assertEqual(c.get('k'), 404)
+        time.sleep(2.5)
+        self.assertEqual(c.get('k'), 404)
+        for n in (1, 2, 3):
+            self.assertNotEqual(c.dump(n).get('k', ('', None, True))[2], False, f'k live on {n}')
+
     def test_write_fails_with_two_home_replicas_down_and_no_other_node_takes_it(self):
         c = self.cluster(KV_CP_INITIAL_NODES=4, KV_CP_MAX_NODES=4, KV_CP_REPLICAS=3,
                          KV_CP_READ_QUORUM=2, KV_CP_WRITE_QUORUM=2, KV_CP_FORWARD_TIMEOUT_MS=300,

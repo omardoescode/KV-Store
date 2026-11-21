@@ -148,7 +148,10 @@ int node_range(const char *addr, uint64_t start, uint64_t end, node_page_fn fn, 
   return rc;
 }
 
-int node_digest(const char *addr, const uint64_t *ends, size_t n, uint64_t *hashes) {
+/** POST {"ends": ends, "purge": purge (if not NULL)} to path. Returns the parsed 200 answer, or
+ * NULL. */
+static json_doc *post_ends(const char *addr, const uint64_t *ends, const bool *purge, size_t n,
+                           const char *path) {
   json_builder *b = json_builder_new();
   json_node *arr = json_new_arr(b);
   json_node *root = json_new_obj(b);
@@ -156,23 +159,40 @@ int node_digest(const char *addr, const uint64_t *ends, size_t n, uint64_t *hash
   for (size_t i = 0; ok && i != n; i++) {
     ok = json_push(arr, json_new_int(b, (int64_t)ends[i]));
   }
+  json_node *flags = purge ? json_new_arr(b) : NULL;
+  ok = (bool)(ok && (!purge || json_put(b, root, "purge", flags)));
+  for (size_t i = 0; ok && purge && i != n; i++) {
+    ok = json_push(flags, json_new_bool(b, purge[i]));
+  }
   size_t len = 0;
   char *body = ok ? json_to_bytes(root, &len) : NULL;
   json_builder_free(b);
   if (!body) {
-    return -1;
+    return NULL;
   }
-  hclient_req req = {"POST", "/_internal/digest", NULL, body, len, call_timeout_ms};
+  hclient_req req = {"POST", path, NULL, body, len, call_timeout_ms};
   hclient_resp resp = {0, NULL, 0};
   int status = call(addr, &req, &resp);
   free(body);
   json_doc *doc = status == 200 ? json_parse(resp.body, resp.len) : NULL;
   free(resp.body);
+  return doc;
+}
+
+int node_digest(const char *addr, const uint64_t *ends, size_t n, uint64_t *hashes) {
+  json_doc *doc = post_ends(addr, ends, NULL, n, "/_internal/digest");
   const json_val *got = json_get(json_doc_root(doc), "hashes");
   int rc = json_type_of(got) == JSON_ARRAY && json_len(got) == n ? 0 : -1;
   for (size_t i = 0; rc == 0 && i != n; i++) {
     hashes[i] = (uint64_t)json_int(json_at(got, i));
   }
+  json_doc_free(doc);
+  return rc;
+}
+
+int node_purge(const char *addr, const uint64_t *ends, const bool *purge, size_t n) {
+  json_doc *doc = post_ends(addr, ends, purge, n, "/_internal/purge");
+  int rc = json_type_of(json_get(json_doc_root(doc), "purged")) == JSON_NUMBER ? 0 : -1;
   json_doc_free(doc);
   return rc;
 }
@@ -209,10 +229,4 @@ int node_delete_keys(const char *addr, const node_row *rows, size_t n) {
   char *body = ok && json_put(b, root, "keys", keys) ? json_to_bytes(root, &len) : NULL;
   json_builder_free(b);
   return post(addr, body, len, "/_internal/delete-batch");
-}
-
-int node_pause_purge(const char *addr, bool paused) {
-  const char *body = paused ? "{\"paused\":true}" : "{\"paused\":false}";
-  hclient_req req = {"POST", "/_internal/purge", NULL, body, strlen(body), call_timeout_ms};
-  return call(addr, &req, NULL) == 200 ? 0 : -1;
 }

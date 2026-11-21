@@ -19,7 +19,7 @@ typedef struct {
   int flush_interval_ms;
   /** >= 1. */
   size_t max_pending;
-  /** >= 1. Seconds a tombstone stays before the purge removes it. */
+  /** >= 1. Seconds after its write (its stamp ts) that kv_store_purge may remove a tombstone. */
   long tombstone_ttl_s;
 } kv_store_options;
 
@@ -47,10 +47,9 @@ typedef int (*kv_dump_fn)(void *ctx, const kv_dump_row *row);
 /**
  * Load every row of the SQLite database at opt->db_path into memory, upgrading an older database
  * (its version column becomes the ts of an empty clock), then start a writer thread that commits
- * queued changes every flush_interval_ms and, once per second, purges tombstones older than the
- * TTL. The writer thread reports failed commits to log; it keeps the changes and retries them, but
- * drops a change that cannot commit whatever the database state. Put and delete fail while
- * max_pending changes wait for the database. Returns NULL on error.
+ * queued changes every flush_interval_ms. The writer thread reports failed commits to log; it keeps
+ * the changes and retries them, but drops a change that cannot commit whatever the database state.
+ * Put and delete fail while max_pending changes wait for the database. Returns NULL on error.
  */
 kv_store *kv_store_new(const kv_store_options *opt, logger log);
 
@@ -116,8 +115,13 @@ int kv_store_digest(kv_store *store, const uint64_t *ends, size_t n, uint64_t *h
  */
 int kv_store_range(kv_store *store, uint64_t start, uint64_t end, kv_dump_fn fn, void *ctx);
 
-/** Pause or resume the tombstone purge. Returns after a running purge round ends. */
-void kv_store_pause_purge(kv_store *store, bool paused);
+/**
+ * Remove the tombstones whose stamp ts is older than the TTL from the segments i with purge[i], of
+ * the n segments that end at ends (see kv_store_digest), and queue the removals. cp calls it once
+ * every home replica of a segment holds the same entries, so no replica brings a purged key back.
+ * Does no IO. Returns the count removed, or -1 on error.
+ */
+int kv_store_purge(kv_store *store, const uint64_t *ends, const bool *purge, size_t n);
 
 /**
  * Call fn(ctx, status) once every change queued before this call is committed: at once on the

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "cp/driver.h"
 #include "cp_fake.h"
@@ -71,15 +72,6 @@ static cluster_view *view(world *w) {
   return &v;
 }
 
-static bool any_purge_paused(void) {
-  for (int id = 1; id <= 4; id++) {
-    if (fake_purge_paused(id)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 static bool is(const char *got, const char *want) {
   return got && want ? strcmp(got, want) == 0 : got == want;
 }
@@ -96,7 +88,6 @@ static void test_join_moves_keys_to_the_new_node(void) {
   assert(is(fake_get(4, "k2"), "a") && is(fake_get(4, "k7"), "b") && is(fake_get(4, "k0"), NULL));
   assert(is(fake_get(1, "k2"), NULL) && is(fake_get(2, "k7"), NULL));
   assert(is(fake_get(2, "k0"), "c"));
-  assert(!any_purge_paused());
   stop(w);
   printf("  test_join_moves_keys_to_the_new_node OK\n");
 }
@@ -113,7 +104,6 @@ static void test_dead_node_is_respawned_and_repaired(void) {
   cluster_view *v = view(w);
   assert(v->nodes[3].sm.state == NODE_ACTIVE && fake_running(3));
   assert(is(fake_get(3, "k0"), "new"));
-  assert(!any_purge_paused());
   stop(w);
   printf("  test_dead_node_is_respawned_and_repaired OK\n");
 }
@@ -131,7 +121,6 @@ static void test_purge_retries_until_old_owner_drops_moved_keys(void) {
   cluster_view *v = view(w);
   assert(v->phase == MIG_IDLE && v->nodes[1].sm.state == NODE_ACTIVE);
   assert(is(fake_get(1, "k2"), NULL) && is(fake_get(4, "k2"), "a"));
-  assert(!any_purge_paused());
   stop(w);
   printf("  test_purge_retries_until_old_owner_drops_moved_keys OK\n");
 }
@@ -145,7 +134,6 @@ static void test_join_aborts_before_flip_then_retries(void) {
   cluster_view *v = view(w);
   assert(v->phase == MIG_IDLE && v->count == 3 && !v->nodes[4].exists && v->add_requested);
   assert(is(fake_get(1, "k2"), "a"));
-  assert(!any_purge_paused());
   controller_tick(w->ctl);
   v = view(w);
   assert(v->phase == MIG_IDLE && v->nodes[4].in_ring);
@@ -217,6 +205,53 @@ static void test_concurrent_writes_of_two_coordinators_agree_after_repair(void) 
   printf("  test_concurrent_writes_of_two_coordinators_agree_after_repair OK\n");
 }
 
+/** Run a tick after the anti-entropy interval (1 s), so it runs an anti-entropy round. */
+static void tick_with_anti_entropy(world *w) {
+  struct timespec second = {1, 0};
+  nanosleep(&second, NULL);
+  controller_tick(w->ctl);
+}
+
+static void test_anti_entropy_sends_a_tombstone_to_a_replica_without_the_key(void) {
+  world *w = start(2);
+  fake_put(2, "k0", "v");
+  fake_del(2, "k0");
+  controller_tick(w->ctl);
+  assert(fake_has(3, "k0") && is(fake_get(3, "k0"), NULL));
+  stop(w);
+  printf("  test_anti_entropy_sends_a_tombstone_to_a_replica_without_the_key OK\n");
+}
+
+static void test_a_tombstone_is_purged_once_every_home_replica_holds_it(void) {
+  world *w = start(2);
+  fake_put(2, "k0", "v");
+  fake_del(2, "k0");
+  controller_tick(w->ctl);
+  assert(fake_has(2, "k0") && fake_has(3, "k0"));
+  tick_with_anti_entropy(w);
+  assert(!fake_has(2, "k0") && !fake_has(3, "k0"));
+  stop(w);
+  printf("  test_a_tombstone_is_purged_once_every_home_replica_holds_it OK\n");
+}
+
+static void test_a_replica_down_past_the_ttl_does_not_bring_a_deleted_key_back(void) {
+  world *w = start(2);
+  fake_put(2, "k0", "v");
+  fake_put(3, "k0", "v");
+  controller_tick(w->ctl);
+  fake_kill(3);
+  fake_del(2, "k0");
+  tick_with_anti_entropy(w);
+  assert(fake_has(2, "k0") && is(fake_get(3, "k0"), "v"));
+  controller_tick(w->ctl);
+  assert(view(w)->nodes[3].sm.state == NODE_ACTIVE && fake_running(3));
+  assert(is(fake_get(2, "k0"), NULL) && is(fake_get(3, "k0"), NULL));
+  tick_with_anti_entropy(w);
+  assert(!fake_has(2, "k0") && !fake_has(3, "k0"));
+  stop(w);
+  printf("  test_a_replica_down_past_the_ttl_does_not_bring_a_deleted_key_back OK\n");
+}
+
 int main(void) {
   printf("controller tests:\n");
   test_join_moves_keys_to_the_new_node();
@@ -227,6 +262,9 @@ int main(void) {
   test_new_cp_aborts_a_join_stored_in_copy();
   test_anti_entropy_makes_replicas_that_differ_agree();
   test_concurrent_writes_of_two_coordinators_agree_after_repair();
+  test_anti_entropy_sends_a_tombstone_to_a_replica_without_the_key();
+  test_a_tombstone_is_purged_once_every_home_replica_holds_it();
+  test_a_replica_down_past_the_ttl_does_not_bring_a_deleted_key_back();
   printf("all controller tests passed\n");
   return 0;
 }

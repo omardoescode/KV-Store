@@ -65,15 +65,19 @@ expect_body '{"value":"v"}' "$url/old"
 expect_body '{"items":[{"key":"old","value":"v","clock":"","ts":0,"coord":0,"deleted":false}],"next":null}' \
   "$url/_internal/dump"
 
-# A paused purge keeps tombstones past the TTL; a resumed one removes them
-curl -sf -X POST -d '{"paused":true}' "$url/_internal/purge"
+# A purge removes the tombstones whose stamp ts is past the TTL, only in the segments it names
 curl -sf -X DELETE "$url/old"
-sleep 2.5
-expect_body '{"items":[{"key":"old","value":"","clock":"","ts":0,"coord":0,"deleted":true}],"next":null}' \
+young=$(($(date +%s%3N) << 16))
+curl -s -o /dev/null -X DELETE -H 'x-kv-clock: 1:1:0' -H "x-kv-ts: $young" -H 'x-kv-coord: 1' \
+  "$url/young"
+expect_body '{"purged":0}' -X POST -d '{"ends":[-1],"purge":[false]}' "$url/_internal/purge"
+expect_body '{"purged":1}' -X POST -d '{"ends":[-1],"purge":[true]}' "$url/_internal/purge"
+curl -sf -X POST "$url/_internal/flush"
+expect_body '{"items":[{"key":"young","value":"","clock":"1:1:0","ts":'"$young"',"coord":1,"deleted":true}],"next":null}' \
   "$url/_internal/dump"
-curl -sf -X POST -d '{"paused":false}' "$url/_internal/purge"
-sleep 2.5
-expect_body '{"items":[],"next":null}' "$url/_internal/dump"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -d '{"ends":[-1],"purge":[]}' \
+  "$url/_internal/purge")
+[ "$code" = 400 ] || fail "purge flags of another length gave $code"
 expect_body 'Key not found.' -X DELETE "$url/old"
 stop
 

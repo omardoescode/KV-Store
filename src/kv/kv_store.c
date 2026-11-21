@@ -64,16 +64,10 @@ struct kv_store {
   sqlite3 *db;
   sqlite3_stmt *upsert;
   sqlite3_stmt *remove;
-  sqlite3_stmt *purge_select;
-  sqlite3_stmt *purge_delete;
   // A second connection for kv_store_dump, which runs on caller threads. Guarded by reader_mu.
   sqlite3 *reader;
   sqlite3_stmt *dump;
   pthread_mutex_t reader_mu;
-  // Held for a whole purge round, so kv_store_pause_purge returns only when none runs.
-  pthread_mutex_t purge_mu;
-  bool purge_paused;
-  int64_t last_purge_ms;
   pthread_t writer;
   pthread_mutex_t mu;
   pthread_cond_t wake;
@@ -417,53 +411,6 @@ static void fire_waiters(kv_store *store, uint64_t seq) {
   }
 }
 
-/**
- * Once per second, remove up to 1000 tombstones older than the TTL from the database and the map,
- * unless kv_store_pause_purge paused it. Writer thread only.
- */
-static void purge(kv_store *store) {
-  int64_t now = now_ms();
-  if (now - store->last_purge_ms < 1000) {
-    return;
-  }
-  store->last_purge_ms = now;
-  pthread_mutex_lock(&store->purge_mu);
-  if (store->purge_paused) {
-    pthread_mutex_unlock(&store->purge_mu);
-    return;
-  }
-  sqlite3_bind_int64(store->purge_select, 1, now - store->tombstone_ttl_ms);
-  int rc;
-  size_t purged = 0;
-  while ((rc = sqlite3_step(store->purge_select)) == SQLITE_ROW) {
-    const char *key = (const char *)sqlite3_column_text(store->purge_select, 0);
-    int64_t stamp = sqlite3_column_int64(store->purge_select, 1);
-    vstamp head;
-    int64_t deleted = 0;
-    pthread_mutex_lock(&store->mu);
-    // A newer put or delete keeps its map entry; the database row then waits for its change.
-    if (key && map_get(store->map, key, &head, &deleted, NULL, NULL) == 1 && deleted == stamp) {
-      (void)hashmap_del(store->map, key);
-    }
-    pthread_mutex_unlock(&store->mu);
-    sqlite3_bind_text(store->purge_delete, 1, key, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(store->purge_delete, 2, stamp);
-    if (sqlite3_step(store->purge_delete) == SQLITE_DONE) {
-      purged++;
-    }
-    sqlite3_reset(store->purge_delete);
-  }
-  if (rc != SQLITE_DONE) {
-    store->log.log(store->log.ctx, LOG_ERROR, "kv_store: purge failed: %s",
-                   sqlite3_errmsg(store->db));
-  }
-  sqlite3_reset(store->purge_select);
-  pthread_mutex_unlock(&store->purge_mu);
-  if (purged) {
-    store->log.log(store->log.ctx, LOG_INFO, "kv_store: purged %zu tombstones", purged);
-  }
-}
-
 /** Commit queued changes every flush interval, keeping a failed batch to retry it. */
 static void *writer_main(void *arg) {
   kv_store *store = arg;
@@ -515,7 +462,6 @@ static void *writer_main(void *arg) {
     }
     if (!store->batch) {
       fire_waiters(store, taken_seq);
-      purge(store);
     }
     if (stopping) {
       if (!store->batch) {
@@ -537,8 +483,6 @@ static void *writer_main(void *arg) {
 static void close_db(kv_store *store) {
   sqlite3_finalize(store->upsert);
   sqlite3_finalize(store->remove);
-  sqlite3_finalize(store->purge_select);
-  sqlite3_finalize(store->purge_delete);
   sqlite3_finalize(store->dump);
   sqlite3_close(store->reader);
   sqlite3_close(store->db);
@@ -575,7 +519,6 @@ kv_store *kv_store_new(const kv_store_options *opt, logger log) {
     return NULL;
   }
   pthread_mutex_init(&store->reader_mu, NULL);
-  pthread_mutex_init(&store->purge_mu, NULL);
 
   store->map = hashmap_new();
   if (!store->map) {
@@ -600,11 +543,6 @@ kv_store *kv_store_new(const kv_store_options *opt, logger log) {
                          -1, &store->upsert, NULL) != SQLITE_OK ||
       sqlite3_prepare_v2(store->db, "DELETE FROM kv WHERE key = ?1", -1, &store->remove, NULL) !=
           SQLITE_OK ||
-      sqlite3_prepare_v2(
-          store->db, "SELECT key, deleted FROM kv WHERE deleted != 0 AND deleted < ?1 LIMIT 1000",
-          -1, &store->purge_select, NULL) != SQLITE_OK ||
-      sqlite3_prepare_v2(store->db, "DELETE FROM kv WHERE key = ?1 AND deleted = ?2", -1,
-                         &store->purge_delete, NULL) != SQLITE_OK ||
       sqlite3_open_v2(db_path, &store->reader, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK ||
       sqlite3_busy_timeout(store->reader, 1000) != SQLITE_OK ||
       sqlite3_prepare_v2(store->reader,
@@ -626,7 +564,6 @@ fail:
   close_db(store);
   hashmap_free(store->map);
   pthread_mutex_destroy(&store->reader_mu);
-  pthread_mutex_destroy(&store->purge_mu);
   pthread_mutex_destroy(&store->mu);
   pthread_cond_destroy(&store->wake);
   free(store);
@@ -650,7 +587,6 @@ int kv_store_free(kv_store *store) {
   close_db(store);
   hashmap_free(store->map);
   pthread_mutex_destroy(&store->reader_mu);
-  pthread_mutex_destroy(&store->purge_mu);
   pthread_mutex_destroy(&store->mu);
   pthread_cond_destroy(&store->wake);
   free(store);
@@ -864,10 +800,72 @@ int kv_store_range(kv_store *store, uint64_t start, uint64_t end, kv_dump_fn fn,
   return hashmap_foreach(store->map, range_entry, &r) == 0 ? r.count : -1;
 }
 
-void kv_store_pause_purge(kv_store *store, bool paused) {
-  pthread_mutex_lock(&store->purge_mu);
-  store->purge_paused = paused;
-  pthread_mutex_unlock(&store->purge_mu);
+typedef struct {
+  const uint64_t *ends;
+  const bool *purge;
+  size_t n;
+  uint64_t before;
+  char **keys;
+  size_t count;
+  size_t cap;
+} purge_ctx;
+
+static bool purgeable(const purge_ctx *p, const char *key, size_t key_len, const vstamp *stamp,
+                      int64_t deleted) {
+  return (bool)(deleted != 0 && stamp->ts < p->before &&
+                p->purge[key_segment(key_position(key, key_len), p->ends, p->n)]);
+}
+
+static int collect_purgeable(const char *key, size_t key_len, const void *val, size_t val_len,
+                             void *arg) {
+  purge_ctx *p = arg;
+  vstamp stamp;
+  int64_t deleted = 0;
+  size_t at = 0;
+  if (decode_entry(val, val_len, &stamp, &deleted, &at) != 0) {
+    return -1;
+  }
+  if (!purgeable(p, key, key_len, &stamp, deleted)) {
+    return 0;
+  }
+  if (p->count == p->cap) {
+    size_t cap = p->cap ? p->cap * 2 : 64;
+    char **grown = (char **)realloc((void *)p->keys, cap * sizeof(*grown));
+    if (!grown) {
+      return -1;
+    }
+    p->keys = grown;
+    p->cap = cap;
+  }
+  p->keys[p->count] = strndup(key, key_len);
+  return p->keys[p->count++] ? 0 : -1;
+}
+
+int kv_store_purge(kv_store *store, const uint64_t *ends, const bool *purge, size_t n) {
+  int64_t cutoff_ms = now_ms() - store->tombstone_ttl_ms;
+  purge_ctx p = {ends, purge, n, cutoff_ms > 0 ? (uint64_t)cutoff_ms << 16U : 0, NULL, 0, 0};
+  int rc = n == 0 || hashmap_foreach(store->map, collect_purgeable, &p) == 0 ? 0 : -1;
+  int purged = 0;
+  for (size_t i = 0; i != p.count; i++) {
+    change *c = rc == 0 ? change_new(p.keys[i], NULL, 0, &(vstamp){0}, 0) : NULL;
+    vstamp stamp;
+    int64_t deleted = 0;
+    pthread_mutex_lock(&store->mu);
+    if (c && store->queued + store->in_batch < store->max_pending &&
+        map_get(store->map, p.keys[i], &stamp, &deleted, NULL, NULL) == 1 &&
+        purgeable(&p, p.keys[i], strlen(p.keys[i]), &stamp, deleted) &&
+        hashmap_del(store->map, p.keys[i]) == 1) {
+      c->remove = true;
+      enqueue(store, c);
+      c = NULL;
+      purged++;
+    }
+    pthread_mutex_unlock(&store->mu);
+    free(c);
+    free(p.keys[i]);
+  }
+  free((void *)p.keys);
+  return rc == 0 ? purged : -1;
 }
 
 int kv_store_flush(kv_store *store, bool now, kv_flush_fn fn, void *ctx) {

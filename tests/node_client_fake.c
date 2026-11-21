@@ -18,7 +18,6 @@ typedef struct {
 
 typedef struct {
   bool up;
-  bool purge_paused;
   size_t n;
   fake_row rows[FAKE_ROWS];
 } fake_node;
@@ -82,12 +81,18 @@ static void put(fake_node *n, const node_row *r) {
 
 void fake_put(int id, const char *key, const char *value) {
   writes++;
-  node_row r = {key, strlen(key), value, strlen(value), {{1, {{1, writes}}}, writes, 1}, false};
+  node_row r = {key, strlen(key), value, strlen(value), {{1, {{1, writes, 0}}}, writes, 1}, false};
+  put(&nodes[id], &r);
+}
+
+void fake_del(int id, const char *key) {
+  writes++;
+  node_row r = {key, strlen(key), "", 0, {{1, {{1, writes, 0}}}, writes, 1}, true};
   put(&nodes[id], &r);
 }
 
 void fake_put_stamp(int id, const char *key, const char *value, int coord, uint64_t ts) {
-  node_row r = {key, strlen(key), value, strlen(value), {{1, {{coord, 1}}}, ts, coord}, false};
+  node_row r = {key, strlen(key), value, strlen(value), {{1, {{coord, 1, 0}}}, ts, coord}, false};
   put(&nodes[id], &r);
 }
 
@@ -96,13 +101,13 @@ const char *fake_get(int id, const char *key) {
   return row && !row->deleted ? row->value : NULL;
 }
 
+bool fake_has(int id, const char *key) { return find(&nodes[id], key, strlen(key)) != NULL; }
+
 void fake_kill(int id) { nodes[id].up = false; }
 
 void fake_start(int id) { nodes[id].up = true; }
 
 bool fake_running(int id) { return nodes[id].up; }
-
-bool fake_purge_paused(int id) { return nodes[id].purge_paused; }
 
 void node_client_init(const cp_config *cfg) { (void)cfg; }
 
@@ -180,11 +185,17 @@ int node_delete_keys(const char *addr, const node_row *rows, size_t n) {
   return 0;
 }
 
-int node_pause_purge(const char *addr, bool paused) {
-  fake_node *n = node_at(addr);
-  if (!n) {
+int node_purge(const char *addr, const uint64_t *ends, const bool *purge, size_t n) {
+  fake_node *node = node_at(addr);
+  if (!node) {
     return -1;
   }
-  n->purge_paused = paused;
+  // Every tombstone is past the TTL.
+  for (size_t i = node->n; i-- != 0;) {
+    const fake_row *r = &node->rows[i];
+    if (r->deleted && purge[key_segment(key_position(r->key, strlen(r->key)), ends, n)]) {
+      node->rows[i] = node->rows[--node->n];
+    }
+  }
   return 0;
 }

@@ -115,7 +115,7 @@ void controller_tick(controller *ctl) {
   static cluster_view v;
   cluster_snapshot(ctl->c, &v);
   if (v.phase == MIG_IDLE && ctl_mono_ms() - ctl->last_anti_entropy_ms >= ANTI_ENTROPY_MS) {
-    if (ctl_anti_entropy(ctl, 0) != 0) {
+    if (ctl_anti_entropy(ctl) != 0) {
       LOGF(ctl, LOG_WARN, "anti-entropy: a round failed");
     }
     ctl->last_anti_entropy_ms = ctl_mono_ms();
