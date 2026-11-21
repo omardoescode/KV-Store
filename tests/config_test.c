@@ -218,7 +218,6 @@ static void test_cp_bad(void) {
   cp_expect_bad("KV_CP_READ_QUORUM", "4");
   cp_expect_bad("KV_CP_WRITE_QUORUM", "0");
   cp_expect_bad("KV_CP_WRITE_QUORUM", "4");
-  cp_expect_bad("KV_CP_REPLICAS", "1");
   cp_expect_bad("KV_CP_INITIAL_NODES", "4");
   cp_expect_bad("KV_CP_INITIAL_NODES", "0");
   cp_expect_bad("KV_CP_VNODES", "0");
@@ -276,6 +275,22 @@ static void test_cp_warns_when_quorums_may_not_overlap(void) {
   printf("  test_cp_warns_when_quorums_may_not_overlap OK\n");
 }
 
+static void test_cp_quorums_default_to_a_majority_of_replicas(void) {
+  cp_config cfg;
+  cp_set_required();
+  setenv("KV_CP_INITIAL_NODES", "1", 1);
+  setenv("KV_CP_REPLICAS", "1", 1);
+  assert(cp_config_load(&cfg) == 0 && cfg.read_quorum == 1 && cfg.write_quorum == 1);
+  setenv("KV_CP_INITIAL_NODES", "5", 1);
+  setenv("KV_CP_MAX_NODES", "5", 1);
+  setenv("KV_CP_REPLICAS", "4", 1);
+  assert(cp_config_load(&cfg) == 0 && cfg.read_quorum == 3 && cfg.write_quorum == 3);
+  setenv("KV_CP_REPLICAS", "5", 1);
+  setenv("KV_CP_WRITE_QUORUM", "4", 1);
+  assert(cp_config_load(&cfg) == 0 && cfg.read_quorum == 3 && cfg.write_quorum == 4);
+  printf("  test_cp_quorums_default_to_a_majority_of_replicas OK\n");
+}
+
 int main(void) {
   printf("config tests:\n");
   test_required_set_uses_optional_defaults();
@@ -288,6 +303,7 @@ int main(void) {
   test_cp_overrides();
   test_cp_bad();
   test_cp_warns_when_quorums_may_not_overlap();
+  test_cp_quorums_default_to_a_majority_of_replicas();
   printf("all config tests passed\n");
   return 0;
 }

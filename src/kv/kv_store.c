@@ -716,7 +716,7 @@ static int apply(kv_store *store, const char *key, const void *value, size_t val
   if (store->queued + store->in_batch < store->max_pending) {
     int found = map_get(store->map, key, &old, &old_deleted, &old_value, &old_len);
     int pick = found == 1 ? vstamp_pick(stamp, &old, &winner) : 0;
-    if (found < 0 || pick < 0) {
+    if (found < 0) {
       status = -1;
     } else if (pick == 0) {
       status = found && !old_deleted ? 1 : 0;

@@ -49,10 +49,10 @@ sqlite3 "$KV_DB_PATH" "CREATE TABLE kv(key TEXT PRIMARY KEY, value BLOB,
   INSERT INTO kv VALUES('lww', CAST('v' AS BLOB), 42, 0);"
 start
 expect_body '{"value":"v","clock":"","ts":42,"coord":0,"deleted":false}' "$url/_internal/get?key=lww"
-curl -sf -X POST -H 'x-kv-clock: 2:1' -H 'x-kv-ts: 7' -H 'x-kv-coord: 2' -d '{"value":"new"}' \
+curl -sf -X POST -H 'x-kv-clock: 2:1:0' -H 'x-kv-ts: 7' -H 'x-kv-coord: 2' -d '{"value":"new"}' \
   "$url/lww"
 curl -sf -X POST "$url/_internal/flush"
-expect_body '{"items":[{"key":"lww","value":"new","clock":"2:1","ts":7,"coord":2,"deleted":false}],"next":null}' \
+expect_body '{"items":[{"key":"lww","value":"new","clock":"2:1:0","ts":7,"coord":2,"deleted":false}],"next":null}' \
   "$url/_internal/dump"
 stop
 rm -f "$KV_DB_PATH"*
@@ -108,21 +108,21 @@ start
 stamped() {
   curl -sf -X "$1" -H "x-kv-clock: $2" -H "x-kv-ts: $3" -H 'x-kv-coord: 1' "$4" "$5" >/dev/null
 }
-stamped POST 1:2 2 -d'{"value":"a"}' "$url/ae-a"
-stamped POST 1:1 1 -d'{"value":"b"}' "$url/ae-b"
-curl -s -o /dev/null -X DELETE -H 'x-kv-clock: 1:2' -H 'x-kv-ts: 2' -H 'x-kv-coord: 1' "$url/ae-b"
+stamped POST 1:2:0 2 -d'{"value":"a"}' "$url/ae-a"
+stamped POST 1:1:0 1 -d'{"value":"b"}' "$url/ae-b"
+curl -s -o /dev/null -X DELETE -H 'x-kv-clock: 1:2:0' -H 'x-kv-ts: 2' -H 'x-kv-coord: 1' "$url/ae-b"
 digest() { curl -s -X POST -d '{"ends":[-1]}' "$url/_internal/digest"; }
 d1=$(digest)
 case $d1 in '{"hashes":['*']}') ;; *) fail "bad digest $d1" ;; esac
 [ "$d1" != '{"hashes":[0]}' ] || fail "digest of two entries is 0"
-stamped POST 1:1 9 -d'{"value":"older"}' "$url/ae-a"
+stamped POST 1:1:0 9 -d'{"value":"older"}' "$url/ae-a"
 [ "$(digest)" = "$d1" ] || fail "a dominated write changed the digest"
-stamped POST 1:3 3 -d'{"value":"newer"}' "$url/ae-a"
+stamped POST 1:3:0 3 -d'{"value":"newer"}' "$url/ae-a"
 [ "$(digest)" != "$d1" ] || fail "a newer write kept the digest"
 range=$(curl -s "$url/_internal/range?start=0&end=0")
-case $range in *'{"key":"ae-a","value":"newer","clock":"1:3","ts":3,"coord":1,"deleted":false}'*) ;;
+case $range in *'{"key":"ae-a","value":"newer","clock":"1:3:0","ts":3,"coord":1,"deleted":false}'*) ;;
 *) fail "range misses ae-a: $range" ;; esac
-case $range in *'{"key":"ae-b","value":"","clock":"1:2","ts":2,"coord":1,"deleted":true}'*) ;;
+case $range in *'{"key":"ae-b","value":"","clock":"1:2:0","ts":2,"coord":1,"deleted":true}'*) ;;
 *) fail "range misses the tombstone of ae-b: $range" ;; esac
 [ "$(echo "$range" | grep -o '"key"' | wc -l)" = 2 ] || fail "range has other keys: $range"
 stop

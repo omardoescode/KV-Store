@@ -263,8 +263,9 @@ class FailureTest(ClusterTest):
         self.assertEqual(c.put('k', 'old'), 200)
         # An acked write that missed node 1: nodes 2 and 3 get a newer version of the coordinator.
         old = json.loads(c.node_req(2, 'GET', '/_internal/get?key=k')[1])
-        coord, n = old['clock'].split(':')
-        newer = {'key': 'k', 'value': 'new', 'clock': f'{coord}:{int(n) + 1}', 'ts': old['ts'] + 1,
+        coord, n, _ = old['clock'].split(':')
+        newer = {'key': 'k', 'value': 'new', 'clock': f'{coord}:{int(n) + 1}:{old["ts"] + 1}',
+                 'ts': old['ts'] + 1,
                  'coord': int(coord), 'deleted': False}
         for node in (2, 3):
             self.assertEqual(c.node_req(node, 'POST', '/_internal/batch', {'items': [newer]})[0], 200)

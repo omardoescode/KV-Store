@@ -107,13 +107,13 @@ static void expect_record(kv_store *store, const char *key, const char *want, co
 static void test_put_with_a_dominating_clock_replaces_and_a_dominated_one_does_not(const char *db) {
   kv_store *store = open_store(db, 10, 1000000);
   assert(store);
-  vstamp first = stamp("1:1", 100, 1);
-  vstamp second = stamp("1:2", 90, 1);
+  vstamp first = stamp("1:1:0", 100, 1);
+  vstamp second = stamp("1:2:0", 90, 1);
   assert(kv_store_put(store, "d", "first", 5, &first) == 0);
   assert(kv_store_put(store, "d", "second", 6, &second) == 0);
-  expect_record(store, "d", "second", "1:2", 90, 1);
+  expect_record(store, "d", "second", "1:2:0", 90, 1);
   assert(kv_store_put(store, "d", "first", 5, &first) == 0);
-  expect_record(store, "d", "second", "1:2", 90, 1);
+  expect_record(store, "d", "second", "1:2:0", 90, 1);
   assert(kv_store_free(store) == 0);
   printf("  test_put_with_a_dominating_clock_replaces_and_a_dominated_one_does_not OK\n");
 }
@@ -121,18 +121,18 @@ static void test_put_with_a_dominating_clock_replaces_and_a_dominated_one_does_n
 static void test_concurrent_puts_keep_the_winner_with_the_merged_clock(const char *db) {
   kv_store *store = open_store(db, 10, 1000000);
   assert(store);
-  vstamp a = stamp("1:1", 100, 1);
-  vstamp b = stamp("2:1", 50, 2);
-  vstamp c = stamp("3:1", 200, 3);
+  vstamp a = stamp("1:1:0", 100, 1);
+  vstamp b = stamp("2:1:0", 50, 2);
+  vstamp c = stamp("3:1:0", 200, 3);
   assert(kv_store_put(store, "c", "a", 1, &a) == 0);
   assert(kv_store_put(store, "c", "b", 1, &b) == 0);
-  expect_record(store, "c", "a", "1:1,2:1", 100, 1);
+  expect_record(store, "c", "a", "1:1:0,2:1:0", 100, 1);
   assert(kv_store_put(store, "c", "c", 1, &c) == 0);
-  expect_record(store, "c", "c", "1:1,2:1,3:1", 200, 3);
+  expect_record(store, "c", "c", "1:1:0,2:1:0,3:1:0", 200, 3);
   assert(kv_store_free(store) == 0);
   store = open_store(db, 10, 1000000);
   assert(store);
-  expect_record(store, "c", "c", "1:1,2:1,3:1", 200, 3);
+  expect_record(store, "c", "c", "1:1:0,2:1:0,3:1:0", 200, 3);
   assert(kv_store_free(store) == 0);
   printf("  test_concurrent_puts_keep_the_winner_with_the_merged_clock OK\n");
 }
@@ -140,19 +140,19 @@ static void test_concurrent_puts_keep_the_winner_with_the_merged_clock(const cha
 static void test_tombstone_carries_its_clock(const char *db) {
   kv_store *store = open_store(db, 10, 1000000);
   assert(store);
-  vstamp put = stamp("1:2", 10, 1);
-  vstamp stale_del = stamp("1:1", 20, 1);
-  vstamp del = stamp("1:3", 30, 1);
+  vstamp put = stamp("1:2:0", 10, 1);
+  vstamp stale_del = stamp("1:1:0", 20, 1);
+  vstamp del = stamp("1:3:0", 30, 1);
   assert(kv_store_put(store, "t", "live", 4, &put) == 0);
   assert(kv_store_del(store, "t", &stale_del) == 1);
   expect_value(store, "t", "live", 4);
   assert(kv_store_del(store, "t", &del) == 1);
-  expect_record(store, "t", NULL, "1:3", 30, 1);
+  expect_record(store, "t", NULL, "1:3:0", 30, 1);
   assert(kv_store_put(store, "t", "live", 4, &put) == 0);
   assert(kv_store_free(store) == 0);
   store = open_store(db, 10, 1000000);
   assert(store);
-  expect_record(store, "t", NULL, "1:3", 30, 1);
+  expect_record(store, "t", NULL, "1:3:0", 30, 1);
   assert(kv_store_free(store) == 0);
   printf("  test_tombstone_carries_its_clock OK\n");
 }
@@ -170,14 +170,14 @@ static void test_version_column_becomes_the_timestamp_of_an_empty_clock(const ch
   assert(store);
   expect_record(store, "v", "lww", "", 42, 0);
   vstamp older = stamp("", 41, 0);
-  vstamp clocked = stamp("1:1", 1, 1);
+  vstamp clocked = stamp("1:1:0", 1, 1);
   assert(kv_store_put(store, "v", "older", 5, &older) == 0);
   expect_record(store, "v", "lww", "", 42, 0);
   assert(kv_store_put(store, "v", "clocked", 7, &clocked) == 0);
   assert(kv_store_free(store) == 0);
   store = open_store(db, 10, 1000000);
   assert(store);
-  expect_record(store, "v", "clocked", "1:1", 1, 1);
+  expect_record(store, "v", "clocked", "1:1:0", 1, 1);
   assert(kv_store_free(store) == 0);
   printf("  test_version_column_becomes_the_timestamp_of_an_empty_clock OK\n");
 }

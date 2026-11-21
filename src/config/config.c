@@ -152,8 +152,6 @@ int cp_config_load(cp_config *cfg) {
   long initial = 3;
   long max_nodes = 3;
   long replicas = 3;
-  long read_quorum = 2;
-  long write_quorum = 2;
   long vnodes = 128;
   long scale_rps = 0;
   long window_s = 10;
@@ -168,8 +166,12 @@ int cp_config_load(cp_config *cfg) {
     return -1;
   }
   // 16 = RING_MAX_REPLICAS: the ring keeps at most 16 replicas of a key.
-  if (env_range("KV_CP_REPLICAS", &replicas, 1, 16) != 0 ||
-      env_range("KV_CP_READ_QUORUM", &read_quorum, 1, 16) != 0 ||
+  if (env_range("KV_CP_REPLICAS", &replicas, 1, 16) != 0) {
+    return -1;
+  }
+  long read_quorum = (replicas / 2) + 1;
+  long write_quorum = read_quorum;
+  if (env_range("KV_CP_READ_QUORUM", &read_quorum, 1, 16) != 0 ||
       env_range("KV_CP_WRITE_QUORUM", &write_quorum, 1, 16) != 0 ||
       env_range("KV_CP_VNODES", &vnodes, 1, 4096) != 0 ||
       env_range("KV_CP_SCALE_RPS", &scale_rps, 0, 1000000000) != 0 ||

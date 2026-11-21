@@ -281,10 +281,7 @@ static void write_new(op *o) {
   if (o->found) {
     stamp.clock = o->win.clock;
   }
-  if (vclock_increment(&stamp.clock, o->p.coord) != 0) {
-    respond(o, 500, NULL, 0);
-    return;
-  }
+  vclock_increment(&stamp.clock, o->p.coord, o->p.ts);
   bool existed = (bool)(o->found && !o->win_deleted);
   o->status = o->kind == OP_DELETE && !existed ? 404 : 200;
   write_entry(o, &stamp, o->kind == OP_DELETE, o->body, o->body_len, none);
@@ -344,9 +341,7 @@ static int take_answer(op *o, size_t i, const char *body, size_t len) {
   if (o->found) {
     vstamp merged;
     pick = vstamp_pick(&o->win, s, &merged);
-    if (pick >= 0) {
-      o->win = merged;
-    }
+    o->win = merged;
   } else {
     o->win = *s;
   }

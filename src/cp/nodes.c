@@ -199,11 +199,7 @@ static int send_winner(ae_out *out, const ae_row *rows, size_t n) {
   vstamp merged = rows[0].stamp;
   for (size_t k = 1; k != n; k++) {
     vstamp next;
-    int pick = vstamp_pick(&merged, &rows[k].stamp, &next);
-    if (pick < 0) {
-      return -1;
-    }
-    win = pick == 1 ? k : win;
+    win = vstamp_pick(&merged, &rows[k].stamp, &next) == 1 ? k : win;
     merged = next;
   }
   bool has[RING_MAX_REPLICAS] = {false};
